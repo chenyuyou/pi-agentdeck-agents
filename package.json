@@ -28,6 +28,8 @@
   "files": [
     "extensions/",
     "agents/",
+    "prompts/",
+    "skills/",
     "README.md",
     "LICENSE"
   ],
@@ -37,6 +39,12 @@
   "pi": {
     "extensions": [
       "./extensions"
+    ],
+    "prompts": [
+      "./prompts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {

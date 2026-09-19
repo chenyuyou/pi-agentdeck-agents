@@ -46,11 +46,55 @@ or browse them in `/agents`.
 | Agent | Model | Thinking | Tools | Role |
 |---|---|---|---|---|
 | `explorer` | `opencode-go/deepseek-v4.1-flash` | low | read, grep, find, ls, bash | fast read-only codebase recon |
-| `planner` | `opencode-go/kimi-k2.7-code` | max | read, grep, find, ls, bash | implementation approach / trade-offs |
+| `planner` | `opencode-go/kimi-k2.7-code` | high | read, grep, find, ls, bash | implementation approach / trade-offs |
 | `reviewer` | `opencode-go/deepseek-v4-pro` | high | read, grep, find, ls, bash | evidence-backed review |
 
-Models are deliberately tiered by cost vs. intelligence. Edit the `model:` /
-`thinking:` lines in your agent files to taste.
+Models are deliberately tiered by cost vs. intelligence. Edit the `model:` line
+in your agent files to taste.
+
+## Prompt templates
+
+The macOS app's bundled prompts, byte-identical, available as `/name`:
+
+| Prompt | Argument | Purpose |
+|---|---|---|
+| `/investigate-a-bug` | `<symptom>` | reproduce → isolate → root-cause, no fix yet |
+| `/plan-a-feature` | `<feature>` | end-to-end plan before code |
+| `/refactor-for-clarity` | `<file or area>` | behaviour-preserving refactor plan |
+| `/review-my-changes` | `[focus]` | self-review staged + unstaged diff |
+
+## Skills
+
+The macOS app's bundled skills, byte-identical:
+
+| Skill | Purpose |
+|---|---|
+| `agent-authoring` | create/review Agent Deck agents |
+| `loop-authoring` | create/refine Agent Deck loops |
+| `mcp-install-helper` | install/import/repair MCP servers |
+| `prompt-authoring` | reusable slash prompt templates |
+| `skill-authoring` | create/validate skills |
+
+## Fidelity to the macOS app
+
+The `agents/`, `prompts/` and `skills/` files are **copies of the macOS app's
+`bundled-agents/`, `bundled-prompts/` and `bundled-skills/`** — same bodies,
+same prompt text, same skill instructions. The agent **bodies are byte-identical**
+to upstream.
+
+Two deliberate, documented kinds of change are applied to the agent frontmatter
+only:
+
+1. **Additions** the pi runtime needs and the macOS app keeps outside the file
+   (it stores per-agent models in its own Models view):
+   `model`, `color`, `icon`, `max_turns`, `prompt_mode`, `disallowed_tools`.
+2. **One removal-for-portability**: `contact_supervisor` stays listed in the
+   original `tools:` (kept verbatim) but is additionally placed in
+   `disallowed_tools`, because that tool only exists inside the macOS app.
+
+Everything else — `whenToUse`, `systemPromptMode`, `defaultExpectedOutcome`,
+`defaultReads`, `defaultProgress`, `tools`, `thinking`, and the full body — is
+kept exactly as upstream.
 
 ## What the extension does
 
@@ -74,11 +118,15 @@ a model, edit the file (or, if you also use the `piagents` CLI, run
 ## Files
 
 ```
-extensions/index.ts      seeding extension (no runtime dependencies)
-agents/explorer.md
-agents/planner.md
-agents/reviewer.md
+extensions/index.ts                 seeding extension (no runtime dependencies)
+agents/{explorer,planner,reviewer}.md
+prompts/{investigate-a-bug,plan-a-feature,refactor-for-clarity,review-my-changes}.md
+skills/{agent-authoring,loop-authoring,mcp-install-helper,prompt-authoring,skill-authoring}/SKILL.md
 ```
+
+The extension seeds the agents; `prompts/` and `skills/` are declared in
+`package.json` (`pi.prompts`, `pi.skills`) so pi loads them straight from the
+package — nothing to copy.
 
 ## License
 
