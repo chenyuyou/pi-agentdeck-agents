@@ -1,10 +1,15 @@
 # pi-agentdeck-agents
 
 The **macOS [Agent Deck](https://agentdeck.site) app's bundled resources**,
-packaged for [pi](https://pi.dev) — and **byte-for-byte identical** to upstream.
+packaged for [pi](https://pi.dev).
 
-`v0.1.0` is the pristine baseline: nothing added, nothing rewritten. It exists so
-later versions can be diffed against something known-good.
+Two cleanly separated layers:
+
+- **Baseline (v0.1.0)** — the 12 bundled files are **byte-for-byte identical** to
+  upstream. Nothing added, nothing rewritten. Verified by hash.
+- **Overlay (v0.2.0)** — per-agent **model pins** in a separate `models.json`,
+  merged into the agent frontmatter only at install time. The baseline files stay
+  pristine.
 
 ## Install
 
@@ -19,58 +24,74 @@ pi install npm:pi-agentdeck-agents
 Then restart pi (the extension copies the agents into
 `$PI_CODING_AGENT_DIR/agents/`, default `~/.pi/agent/agents/`).
 
-## What's inside — 12 files, all upstream-identical
+## What's inside
 
 | Kind | Files | How pi uses it |
 |---|---|---|
-| Agents | `explorer.md`, `planner.md`, `reviewer.md` | copied to `~/.pi/agent/agents/`; discovered by the subagent runtime |
+| Agents | `explorer.md`, `planner.md`, `reviewer.md` | copied to `~/.pi/agent/agents/` (+ model pin); discovered by the subagent runtime |
 | Prompts | `investigate-a-bug`, `plan-a-feature`, `refactor-for-clarity`, `review-my-changes` | `pi.prompts` → `/investigate-a-bug` etc. |
 | Skills | `agent-authoring`, `loop-authoring`, `mcp-install-helper`, `prompt-authoring`, `skill-authoring` | `pi.skills` → `/skill:<name>` |
+| Overlay | `models.json` | per-agent model pins applied on install |
 
 Source: `a-streetcoder/agent-deck` → `agent-deck/bundled-agents`,
 `agent-deck/bundled-prompts`, `agent-deck/bundled-skills`, pinned in
 [`upstream.lock.json`](./upstream.lock.json).
 
-## Verify the copy
+## Verify
 
 ```bash
-npm run verify:fidelity    # local files vs the locked sha256 hashes
-npm run verify:upstream    # also re-downloads upstream and compares
+npm run verify:fidelity   # local baseline files vs the locked sha256 hashes
+npm run verify:upstream   # also re-downloads upstream and compares
+npm run verify:models     # every pin resolves in your local pi model catalog
 ```
 
 `upstream.lock.json` records the exact upstream commit and the SHA-256 of every
-file, so "is it identical?" is a command, not a claim.
+file, so "is the baseline identical?" is a command, not a claim. The overlay is a
+separate file, so it never muddies that check.
 
-The library hashes all 12 files at commit `9efbe6c1dc2a` (2026).
+## Model pins (v0.2.0 overlay)
+
+The macOS app keeps per-agent models in its own Models UI, so the upstream agent
+files carry **no `model:` field**. The overlay supplies them:
+
+| Agent | Pinned model | Upstream thinking |
+|---|---|---|
+| `explorer` | `opencode-go/deepseek-v4.1-flash` | low |
+| `planner` | `opencode-go/kimi-k2.7-code` | high |
+| `reviewer` | `opencode-go/deepseek-v4-pro` | high |
+
+Edit `models.json` to taste (`model` and optionally `thinking`), then
+`/agentdeck-agents sync` to re-install. Remove an agent from `models.json` to let
+it inherit the parent session's model.
 
 ## Baseline semantics (important)
 
-- Agents carry **no `model:` field**. The macOS app keeps per-agent models in its
-  own Models UI, not in the files — so upstream files have none, and neither does
-  this baseline. Subagents therefore inherit the parent session's model.
 - Frontmatter keys that only the macOS app understands (`whenToUse`,
-  `systemPromptMode`, `defaultExpectedOutcome`, `defaultReads`,
-  `defaultProgress`) are preserved verbatim. pi's subagent extensions ignore
-  unknown keys; `systemPromptMode: replace` matches their default `replace`.
+  `systemPromptMode`, `defaultExpectedOutcome`, `defaultReads`, `defaultProgress`)
+  are preserved verbatim. pi's subagent extensions ignore unknown keys;
+  `systemPromptMode: replace` matches their default `replace`.
 - `tools:` includes `contact_supervisor`, which only exists inside the macOS app.
-  pi simply has no such tool; the other tools in the list are unaffected.
-- The extension that seeds the agents never edits their content. Files that
-  already exist on disk are left alone; `/agentdeck-agents sync` overwrites them
-  from the pristine bundle.
+  pi has no such tool; the other tools in the list are unaffected.
+- The seeding extension never edits baseline content. It applies the overlay while
+  writing to `~/.pi/agent/agents/`; a file that already exists on disk is left
+  alone unless `/agentdeck-agents sync` is used.
 
 ## What is *not* the same as the macOS app
 
-Only the packaging is ours: `package.json`, `extensions/index.ts`, `README.md`,
-`scripts/`. The macOS app is a SwiftUI application — its agent library UI, Models
-view, worktrees, issue board, memory and MCP screens are not part of this bundle
-and are not portable to pi.
+Only the packaging is ours: `package.json`, `extensions/index.ts`, `models.json`,
+`scripts/`, `README.md`. The macOS app is a SwiftUI application — its agent
+library UI, Models view, worktrees, issue board, memory and MCP screens are not
+part of this bundle and are not portable to pi.
 
-## Building on the baseline
+## Versioning
 
-Keep `agents/`, `prompts/` and `skills/` untouched, and add your changes as a new
-version layer (bump `version`, tag, publish). That way
-`npm run verify:fidelity` keeps proving the base is clean, and any diff against
-upstream is a deliberate, reviewable change rather than drift.
+The baseline never changes; every update is a new layer on top of it.
+
+| Version | Layer |
+|---|---|
+| `v0.1.0` | pristine baseline (byte-identical upstream) |
+| `v0.2.0` | `models.json` per-agent model pins |
+| next | add whatever you need — keep `agents/`/`prompts/`/`skills/` untouched |
 
 ## Files
 
@@ -82,9 +103,12 @@ prompts/{investigate-a-bug,plan-a-feature,
 skills/{agent-authoring,loop-authoring,
         mcp-install-helper,prompt-authoring,
         skill-authoring}/SKILL.md                pristine
-extensions/index.ts                              seeder (no runtime deps)
+models.json                                      overlay: model pins
+extensions/index.ts                              seeder (baseline + overlay)
 scripts/verify-fidelity.mjs                      hash checker
+scripts/verify-models.mjs                        pin checker
 upstream.lock.json                               upstream commit + sha256
+CHANGELOG.md
 ```
 
 ## License

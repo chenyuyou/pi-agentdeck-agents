@@ -1,6 +1,6 @@
 {
   "name": "pi-agentdeck-agents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent Deck style agent library (explorer / planner / reviewer) for Pi subagents, each with its own model, thinking level, system prompt and tools.",
   "keywords": [
     "pi-package",
@@ -31,13 +31,16 @@
     "prompts/",
     "skills/",
     "scripts/",
+    "models.json",
     "upstream.lock.json",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "verify:fidelity": "node scripts/verify-fidelity.mjs",
-    "verify:upstream": "node scripts/verify-fidelity.mjs --fetch"
+    "verify:upstream": "node scripts/verify-fidelity.mjs --fetch",
+    "verify:models": "node scripts/verify-models.mjs"
   },
   "publishConfig": {
     "access": "public"

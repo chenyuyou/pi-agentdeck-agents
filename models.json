@@ -1,0 +1,14 @@
+{
+  "$comment": "v0.2.0 layer: per-agent model pins applied on top of the pristine upstream agents at install time. The agents/ files stay byte-identical to a-streetcoder/agent-deck (see upstream.lock.json). Remove an agent here to fall back to upstream (no model pin).",
+  "agents": {
+    "explorer": {
+      "model": "opencode-go/deepseek-v4.1-flash"
+    },
+    "planner": {
+      "model": "opencode-go/kimi-k2.7-code"
+    },
+    "reviewer": {
+      "model": "opencode-go/deepseek-v4-pro"
+    }
+  }
+}
