@@ -12,14 +12,14 @@
     "agents"
   ],
   "license": "MIT",
-  "author": "YOUR NAME <you@example.com>",
+  "author": "chenyuyou <chenyuyou@126.com>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR-GH-USER/pi-agentdeck-agents.git"
+    "url": "git+https://github.com/chenyuyou/pi-agentdeck-agents.git"
   },
-  "homepage": "https://github.com/YOUR-GH-USER/pi-agentdeck-agents#readme",
+  "homepage": "https://github.com/chenyuyou/pi-agentdeck-agents#readme",
   "bugs": {
-    "url": "https://github.com/YOUR-GH-USER/pi-agentdeck-agents/issues"
+    "url": "https://github.com/chenyuyou/pi-agentdeck-agents/issues"
   },
   "type": "module",
   "engines": {
