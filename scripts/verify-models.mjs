@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Verify every model pinned in models.json is known to the local pi install.
- * Degrades to a skip when there is no local model catalog.
+ * Verify every model pinned by the overlay resolves in the local pi catalog,
+ * and print its cost. Degrades to a skip when there is no local catalog.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -14,27 +14,42 @@ const overlay = JSON.parse(readFileSync(join(root, "models.json"), "utf8"));
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const storePath = join(agentDir, "models-store.json");
 
+function resolveModel(name) {
+  const agent = overlay.agents?.[name] ?? {};
+  if (agent.model) return agent.model;
+  if (agent.tier) return overlay.tiers?.[agent.tier]?.model;
+  return undefined;
+}
+
 if (!existsSync(storePath)) {
   console.log(`skip: ${storePath} not found (no local model catalog)`);
+  for (const name of Object.keys(overlay.agents ?? {})) console.log(`-     ${name}: ${resolveModel(name) ?? "(inherit)"}`);
   process.exit(0);
 }
 
 const store = JSON.parse(readFileSync(storePath, "utf8"));
-const known = new Set();
+const costs = new Map();
 for (const [provider, body] of Object.entries(store)) {
-  for (const m of body?.models ?? []) known.add(`${provider}/${m.id}`);
+  for (const m of body?.models ?? []) {
+    costs.set(`${provider}/${m.id}`, m.cost ?? {});
+  }
 }
 
 let missing = 0;
-for (const [agent, cfg] of Object.entries(overlay.agents ?? {})) {
-  if (!cfg.model) {
-    console.log(`-     ${agent}: (no model pin, inherits parent)`);
+for (const name of Object.keys(overlay.agents ?? {})) {
+  const model = resolveModel(name);
+  if (!model) {
+    console.log(`-     ${name.padEnd(9)} (inherit parent)`);
     continue;
   }
-  if (known.has(cfg.model)) console.log(`ok    ${agent}: ${cfg.model}`);
-  else {
+  const cost = costs.get(model);
+  if (cost) {
+    const inCost = cost.input ?? "?";
+    const outCost = cost.output ?? "?";
+    console.log(`ok    ${name.padEnd(9)} ${model.padEnd(34)} $${inCost}/$${outCost} per Mtok`);
+  } else {
     missing++;
-    console.log(`MISS  ${agent}: ${cfg.model} not in ${storePath}`);
+    console.log(`MISS  ${name.padEnd(9)} ${model} not in ${storePath}`);
   }
 }
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0 — pi-native glue
+
+Everything the macOS app provided around its resources, implemented for pi.
+Baseline unchanged (`verify:fidelity` still 12/12).
+
+- **`contact_supervisor` implemented** (`extensions/supervisor.ts`): progress /
+  question / blocker messages, JSONL log, pi event bus, supervisor-side
+  notification. The overlay rewrites the app-only plain tool name to
+  `ext:supervisor/contact_supervisor`, which also silences pi's
+  "not a known built-in" warning for upstream agents.
+- **Model tiers** in `models.json` (`tiers` + per-agent `tier`); `verify:models`
+  now prints `$/Mtok` per pin.
+- **Scope-aware seeding**: a project-local install (`pi install -l`) writes agents
+  to `<project>/.pi/agents/` instead of the global directory.
+- **`/route [task]`** — the app's agent library picker, in the TUI.
+- **`/agentdeck`** — status, `sync`, and `doctor` (baseline hashes, runtime,
+  supervisor tool, scope).
+- **pi-native prompt templates** `prompts-pi/`: `/explore`, `/plan`, `/review`.
+- **pi-native skills** `skills-pi/`: `pi-agent-authoring`, `pi-agentdeck`,
+  `pi-mcp-setup` (upstream skills reference app-only UI).
+- **CI** (`ci.yml`) and **upstream watch** (`upstream-watch.yml`) plus
+  `scripts/rebaseline.mjs`.
+- **`NOTICE`**, `UPSTREAM.md`, and a proposal for `agentPaths` in pi's
+  `resources_discover` (`contrib/agentPaths-proposal.md`) that would remove the
+  need to seed files at all.
+
 ## 0.2.0 — per-agent model pins (overlay layer)
 
 Adds cost/intelligence tiering without touching the baseline.

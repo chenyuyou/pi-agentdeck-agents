@@ -1,116 +1,122 @@
 # pi-agentdeck-agents
 
-The **macOS [Agent Deck](https://agentdeck.site) app's bundled resources**,
-packaged for [pi](https://pi.dev).
+The macOS **[Agent Deck](https://agentdeck.site) app's bundled resources** for
+the [pi](https://pi.dev) coding agent — plus the pi-native glue the app provided
+around them.
 
-Two cleanly separated layers:
+Three layers, kept deliberately separate:
 
-- **Baseline (v0.1.0)** — the 12 bundled files are **byte-for-byte identical** to
-  upstream. Nothing added, nothing rewritten. Verified by hash.
-- **Overlay (v0.2.0)** — per-agent **model pins** in a separate `models.json`,
-  merged into the agent frontmatter only at install time. The baseline files stay
-  pristine.
+| Layer | Files | Promise |
+|---|---|---|
+| **Baseline** | `agents/`, `prompts/`, `skills/` | **byte-identical** to upstream, never edited |
+| **Overlay** | `models.json`, `extensions/` | everything pi needs that the app kept in its UI |
+| **Glue** | `/route`, `/agentdeck`, supervisor bridge | pi-native equivalents of the app's UI features |
+
+`npm run verify:fidelity` proves the baseline is untouched at any time.
 
 ## Install
 
 ```bash
-# 1. a pi subagent runtime (does the actual delegation)
+# a pi subagent runtime (does the actual delegation)
 pi install npm:@tintinweb/pi-subagents
 
-# 2. this bundle
+# this bundle
 pi install npm:pi-agentdeck-agents
 ```
 
-Then restart pi (the extension copies the agents into
-`$PI_CODING_AGENT_DIR/agents/`, default `~/.pi/agent/agents/`).
+Project-local instead of global (agents land in `<project>/.pi/agents/`):
 
-## What's inside
+```bash
+pi install -l npm:pi-agentdeck-agents
+```
 
-| Kind | Files | How pi uses it |
+Restart pi afterwards; `/agentdeck doctor` checks the setup.
+
+## What you get
+
+| Kind | Items | How to use |
 |---|---|---|
-| Agents | `explorer.md`, `planner.md`, `reviewer.md` | copied to `~/.pi/agent/agents/` (+ model pin); discovered by the subagent runtime |
-| Prompts | `investigate-a-bug`, `plan-a-feature`, `refactor-for-clarity`, `review-my-changes` | `pi.prompts` → `/investigate-a-bug` etc. |
-| Skills | `agent-authoring`, `loop-authoring`, `mcp-install-helper`, `prompt-authoring`, `skill-authoring` | `pi.skills` → `/skill:<name>` |
-| Overlay | `models.json` | per-agent model pins applied on install |
+| Agents | `explorer`, `planner`, `reviewer` | `Agent(subagent_type: "explorer", …)`, `@explorer`, or `/route` |
+| Prompts (upstream) | `investigate-a-bug`, `plan-a-feature`, `refactor-for-clarity`, `review-my-changes` | `/investigate-a-bug <symptom>` … |
+| Prompts (pi-native) | `explore`, `plan`, `review` | `/explore <area>`, `/plan <feature>`, `/review [focus]` |
+| Skills (upstream) | `agent-authoring`, `loop-authoring`, `mcp-install-helper`, `prompt-authoring`, `skill-authoring` | loaded on demand |
+| Skills (pi-native) | `pi-agent-authoring`, `pi-agentdeck`, `pi-mcp-setup` | loaded on demand |
 
-Source: `a-streetcoder/agent-deck` → `agent-deck/bundled-agents`,
-`agent-deck/bundled-prompts`, `agent-deck/bundled-skills`, pinned in
-[`upstream.lock.json`](./upstream.lock.json).
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/route [task]` | pick a bundled agent (shows its model) and delegate a task to it |
+| `/agentdeck` | list agents, their models and `whenToUse` |
+| `/agentdeck sync` | re-install the agents from baseline + overlay |
+| `/agentdeck doctor` | agents dir, baseline hash status, runtime presence, supervisor tool, scope |
+
+## Supervisor bridge (`contact_supervisor`)
+
+Upstream agents list `contact_supervisor` in `tools:` and their prompts say "ask
+the supervisor one focused question". The macOS app ships a bridge extension for
+it; **pi had no such tool**. `extensions/supervisor.ts` implements it:
+
+- the child emits a `progress` / `question` / `blocker` message,
+- it is appended to `$PI_CODING_AGENT_DIR/agentdeck-supervisor.jsonl` and emitted
+  on pi's shared event bus,
+- the supervising session shows a notification and records an entry.
+
+Non-blocking by design: the child continues with its best judgement. The overlay
+rewrites the app-only plain tool name to pi's selector —
+
+```
+tools: read, grep, find, ls, bash, contact_supervisor      # upstream (plain name: a pi typo)
+tools: read, grep, find, ls, bash, ext:supervisor/contact_supervisor   # installed
+```
+
+— which is also what removes the `tools-error: ... is not a known built-in`
+warning upstream agents would otherwise produce.
+
+## Model tiers
+
+`models.json` supplies the per-agent models the app keeps in its Models UI:
+
+| Agent | Tier | Model |
+|---|---|---|
+| `explorer` | `cheap` | `opencode-go/deepseek-v4.1-flash` |
+| `reviewer` | `balanced` | `opencode-go/deepseek-v4-pro` |
+| `planner` | `genius` | `opencode-go/kimi-k2.7-code` |
+
+Thinking levels stay exactly as upstream. Edit `models.json` (a `model` or a
+`tier`, plus optional `thinking` / `toolsAppend`), then `/agentdeck sync`.
+`npm run verify:models` prints each pin and its `$/Mtok`.
 
 ## Verify
 
 ```bash
-npm run verify:fidelity   # local baseline files vs the locked sha256 hashes
-npm run verify:upstream   # also re-downloads upstream and compares
-npm run verify:models     # every pin resolves in your local pi model catalog
+npm run verify:fidelity   # baseline vs the locked sha256 (12/12)
+npm run verify:upstream   # baseline vs the live upstream files
+npm run verify:models     # every pin resolves locally, with cost
+npm run rebaseline        # pull a new upstream revision into the baseline
 ```
 
-`upstream.lock.json` records the exact upstream commit and the SHA-256 of every
-file, so "is the baseline identical?" is a command, not a claim. The overlay is a
-separate file, so it never muddies that check.
+## Upstream tracking
 
-## Model pins (v0.2.0 overlay)
+`upstream.lock.json` pins the upstream commit and hashes every baseline file.
+`.github/workflows/upstream-watch.yml` checks weekly and opens a PR when upstream
+moves; `scripts/rebaseline.mjs` does the same locally. See [`UPSTREAM.md`](./UPSTREAM.md).
 
-The macOS app keeps per-agent models in its own Models UI, so the upstream agent
-files carry **no `model:` field**. The overlay supplies them:
+## What is *not* the macOS app
 
-| Agent | Pinned model | Upstream thinking |
-|---|---|---|
-| `explorer` | `opencode-go/deepseek-v4.1-flash` | low |
-| `planner` | `opencode-go/kimi-k2.7-code` | high |
-| `reviewer` | `opencode-go/deepseek-v4-pro` | high |
-
-Edit `models.json` to taste (`model` and optionally `thinking`), then
-`/agentdeck-agents sync` to re-install. Remove an agent from `models.json` to let
-it inherit the parent session's model.
-
-## Baseline semantics (important)
-
-- Frontmatter keys that only the macOS app understands (`whenToUse`,
-  `systemPromptMode`, `defaultExpectedOutcome`, `defaultReads`, `defaultProgress`)
-  are preserved verbatim. pi's subagent extensions ignore unknown keys;
-  `systemPromptMode: replace` matches their default `replace`.
-- `tools:` includes `contact_supervisor`, which only exists inside the macOS app.
-  pi has no such tool; the other tools in the list are unaffected.
-- The seeding extension never edits baseline content. It applies the overlay while
-  writing to `~/.pi/agent/agents/`; a file that already exists on disk is left
-  alone unless `/agentdeck-agents sync` is used.
-
-## What is *not* the same as the macOS app
-
-Only the packaging is ours: `package.json`, `extensions/index.ts`, `models.json`,
-`scripts/`, `README.md`. The macOS app is a SwiftUI application — its agent
-library UI, Models view, worktrees, issue board, memory and MCP screens are not
-part of this bundle and are not portable to pi.
+The app is a SwiftUI application: agent library UI, Models view, worktrees, issue
+board, memory and MCP screens are not portable. This bundle carries the resources
+plus pi-native equivalents (routing, supervisor bridge, model overlay). See
+[`NOTICE`](./NOTICE) for attribution.
 
 ## Versioning
-
-The baseline never changes; every update is a new layer on top of it.
 
 | Version | Layer |
 |---|---|
 | `v0.1.0` | pristine baseline (byte-identical upstream) |
-| `v0.2.0` | `models.json` per-agent model pins |
-| next | add whatever you need — keep `agents/`/`prompts/`/`skills/` untouched |
-
-## Files
-
-```
-agents/{explorer,planner,reviewer}.md            pristine
-prompts/{investigate-a-bug,plan-a-feature,
-         refactor-for-clarity,
-         review-my-changes}.md                   pristine
-skills/{agent-authoring,loop-authoring,
-        mcp-install-helper,prompt-authoring,
-        skill-authoring}/SKILL.md                pristine
-models.json                                      overlay: model pins
-extensions/index.ts                              seeder (baseline + overlay)
-scripts/verify-fidelity.mjs                      hash checker
-scripts/verify-models.mjs                        pin checker
-upstream.lock.json                               upstream commit + sha256
-CHANGELOG.md
-```
+| `v0.2.0` | per-agent model pins |
+| `v0.3.0` | supervisor bridge, tool mapping, tiers, `/route`, `/agentdeck`, pi-native prompts & skills, CI + upstream watch |
 
 ## License
 
-MIT (the bundled resources come from the MIT-licensed Agent Deck app).
+MIT. Bundled resources are MIT, from the Agent Deck project (see `NOTICE`).

@@ -1,0 +1,44 @@
+name: upstream-watch
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  rebaseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check for upstream drift
+        id: drift
+        continue-on-error: true
+        run: node scripts/rebaseline.mjs --check
+
+      - name: Re-baseline
+        if: steps.drift.outcome == 'failure'
+        run: node scripts/rebaseline.mjs
+
+      - name: Open a pull request
+        if: steps.drift.outcome == 'failure'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: chore/upstream-rebaseline
+          title: "chore: re-baseline upstream Agent Deck resources"
+          commit-message: "chore: re-baseline upstream Agent Deck resources"
+          body: |
+            Automated re-baseline of `agents/`, `prompts/` and `skills/` against
+            `a-streetcoder/agent-deck`.
+
+            Review the diff: the baseline must stay byte-identical to upstream, so
+            any content change here is upstream's, not ours. The overlay
+            (`models.json`) is untouched. If the change is meaningful for users,
+            bump the package version and update `CHANGELOG.md`.

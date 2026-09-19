@@ -1,0 +1,35 @@
+# NOTICE
+
+## Upstream content
+
+Everything under `agents/`, `prompts/` and `skills/` is a **byte-identical copy**
+of resources bundled with the macOS **Agent Deck** application:
+
+- Source: https://github.com/a-streetcoder/agent-deck
+- Paths: `agent-deck/bundled-agents`, `agent-deck/bundled-prompts`, `agent-deck/bundled-skills`
+- Commit: see `upstream.lock.json` (`commit`, plus a SHA-256 per file)
+- License: MIT (see the upstream repository)
+
+These files are not modified in this repository. Verification:
+
+```bash
+npm run verify:fidelity   # local copies vs the hashes in upstream.lock.json
+npm run verify:upstream   # the same, checked against the live upstream files
+```
+
+## Original work in this repository
+
+Only the packaging and the pi integration are original to this project:
+
+- `package.json` — pi package manifest
+- `extensions/index.ts` — seeder, supervisor surfacing, `/route`, `/agentdeck`
+- `extensions/supervisor.ts` — a pi implementation of the app's `contact_supervisor` tool
+- `models.json` — per-agent model/tier overlay
+- `prompts-pi/`, `skills-pi/` — pi-native prompt templates and skills
+- `scripts/`, `.github/workflows/`, documentation
+
+## Trademarks
+
+"Agent Deck" refers to the upstream macOS application. This package is an
+independent, unofficial redistribution of that app's bundled resources for the
+pi coding agent and is not affiliated with or endorsed by the upstream project.

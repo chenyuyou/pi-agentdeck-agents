@@ -1,14 +1,17 @@
 {
-  "$comment": "v0.2.0 layer: per-agent model pins applied on top of the pristine upstream agents at install time. The agents/ files stay byte-identical to a-streetcoder/agent-deck (see upstream.lock.json). Remove an agent here to fall back to upstream (no model pin).",
+  "$comment": "v0.3.0 overlay. Applied only when agents are installed into the agent dir; agents/, prompts/, skills/ stay byte-identical to upstream. tier -> model, toolMap -> rewrites the app-only `contact_supervisor` tool name to this package's pi implementation.",
+  "tiers": {
+    "cheap": { "model": "opencode-go/deepseek-v4.1-flash" },
+    "balanced": { "model": "opencode-go/deepseek-v4-pro" },
+    "genius": { "model": "opencode-go/kimi-k2.7-code" }
+  },
+  "toolMap": {
+    "contact_supervisor": "ext:supervisor/contact_supervisor"
+  },
+  "toolAppend": [],
   "agents": {
-    "explorer": {
-      "model": "opencode-go/deepseek-v4.1-flash"
-    },
-    "planner": {
-      "model": "opencode-go/kimi-k2.7-code"
-    },
-    "reviewer": {
-      "model": "opencode-go/deepseek-v4-pro"
-    }
+    "explorer": { "tier": "cheap" },
+    "planner": { "tier": "genius" },
+    "reviewer": { "tier": "balanced" }
   }
 }

@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Baseline is byte-identical to upstream
+        run: npm run verify:fidelity
+      - name: Upstream still matches the lock
+        run: npm run verify:upstream
+      - name: Model pins resolve (skips without a local catalog)
+        run: npm run verify:models
+      - name: Package tarball contents
+        run: npm pack --dry-run
