@@ -13,15 +13,20 @@ These are the same Markdown + YAML frontmatter agent files used by the macOS
 
 ## Install
 
-Install a pi subagent runtime that discovers agents from `~/.pi/agent/agents/`,
-then this package:
+Via npm (the official pi-package flow):
 
 ```bash
 # 1. runtime (does the actual delegation)
 pi install npm:@tintinweb/pi-subagents
 
 # 2. this agent library
-pi install git:github.com/<YOUR-GH-USER>/pi-agentdeck-agents
+pi install npm:pi-agentdeck-agents
+```
+
+Or straight from GitHub (source, pinnable to a tag):
+
+```bash
+pi install git:github.com/YOUR-GH-USER/pi-agentdeck-agents@v0.1.0
 ```
 
 Then restart pi, or run `/agentdeck-agents sync` inside pi.
