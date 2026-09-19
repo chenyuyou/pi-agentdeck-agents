@@ -30,9 +30,15 @@
     "agents/",
     "prompts/",
     "skills/",
+    "scripts/",
+    "upstream.lock.json",
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "verify:fidelity": "node scripts/verify-fidelity.mjs",
+    "verify:upstream": "node scripts/verify-fidelity.mjs --fetch"
+  },
   "publishConfig": {
     "access": "public"
   },

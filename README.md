@@ -1,133 +1,92 @@
 # pi-agentdeck-agents
 
-A tiny [pi](https://pi.dev) package that installs the **Agent Deck style agent
-library** — `explorer`, `planner`, `reviewer` — into pi's global agent
-directory, so every project and every machine gets the same specialist agents,
-**each with its own model, thinking level, system prompt and tool set**.
+The **macOS [Agent Deck](https://agentdeck.site) app's bundled resources**,
+packaged for [pi](https://pi.dev) — and **byte-for-byte identical** to upstream.
 
-These are the same Markdown + YAML frontmatter agent files used by the macOS
-[Agent Deck](https://agentdeck.site) app and by the pi subagent extensions
-([`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents),
-[`@gotgenes/pi-subagents`](https://www.npmjs.com/package/@gotgenes/pi-subagents),
-[`pi-subagents`](https://www.npmjs.com/package/pi-subagents)).
+`v0.1.0` is the pristine baseline: nothing added, nothing rewritten. It exists so
+later versions can be diffed against something known-good.
 
 ## Install
 
-Via npm (the official pi-package flow):
-
 ```bash
-# 1. runtime (does the actual delegation)
+# 1. a pi subagent runtime (does the actual delegation)
 pi install npm:@tintinweb/pi-subagents
 
-# 2. this agent library
+# 2. this bundle
 pi install npm:pi-agentdeck-agents
 ```
 
-Or straight from GitHub (source, pinnable to a tag):
+Then restart pi (the extension copies the agents into
+`$PI_CODING_AGENT_DIR/agents/`, default `~/.pi/agent/agents/`).
+
+## What's inside — 12 files, all upstream-identical
+
+| Kind | Files | How pi uses it |
+|---|---|---|
+| Agents | `explorer.md`, `planner.md`, `reviewer.md` | copied to `~/.pi/agent/agents/`; discovered by the subagent runtime |
+| Prompts | `investigate-a-bug`, `plan-a-feature`, `refactor-for-clarity`, `review-my-changes` | `pi.prompts` → `/investigate-a-bug` etc. |
+| Skills | `agent-authoring`, `loop-authoring`, `mcp-install-helper`, `prompt-authoring`, `skill-authoring` | `pi.skills` → `/skill:<name>` |
+
+Source: `a-streetcoder/agent-deck` → `agent-deck/bundled-agents`,
+`agent-deck/bundled-prompts`, `agent-deck/bundled-skills`, pinned in
+[`upstream.lock.json`](./upstream.lock.json).
+
+## Verify the copy
 
 ```bash
-pi install git:github.com/YOUR-GH-USER/pi-agentdeck-agents@v0.1.0
+npm run verify:fidelity    # local files vs the locked sha256 hashes
+npm run verify:upstream    # also re-downloads upstream and compares
 ```
 
-Then restart pi, or run `/agentdeck-agents sync` inside pi.
+`upstream.lock.json` records the exact upstream commit and the SHA-256 of every
+file, so "is it identical?" is a command, not a claim.
 
-That's it — in any project:
+The library hashes all 12 files at commit `9efbe6c1dc2a` (2026).
 
-```text
-Use explorer to map this codebase before we plan.
-Ask planner for an implementation plan.
-Run reviewer on my diff.
-```
+## Baseline semantics (important)
 
-or browse them in `/agents`.
+- Agents carry **no `model:` field**. The macOS app keeps per-agent models in its
+  own Models UI, not in the files — so upstream files have none, and neither does
+  this baseline. Subagents therefore inherit the parent session's model.
+- Frontmatter keys that only the macOS app understands (`whenToUse`,
+  `systemPromptMode`, `defaultExpectedOutcome`, `defaultReads`,
+  `defaultProgress`) are preserved verbatim. pi's subagent extensions ignore
+  unknown keys; `systemPromptMode: replace` matches their default `replace`.
+- `tools:` includes `contact_supervisor`, which only exists inside the macOS app.
+  pi simply has no such tool; the other tools in the list are unaffected.
+- The extension that seeds the agents never edits their content. Files that
+  already exist on disk are left alone; `/agentdeck-agents sync` overwrites them
+  from the pristine bundle.
 
-## Agents
+## What is *not* the same as the macOS app
 
-| Agent | Model | Thinking | Tools | Role |
-|---|---|---|---|---|
-| `explorer` | `opencode-go/deepseek-v4.1-flash` | low | read, grep, find, ls, bash | fast read-only codebase recon |
-| `planner` | `opencode-go/kimi-k2.7-code` | high | read, grep, find, ls, bash | implementation approach / trade-offs |
-| `reviewer` | `opencode-go/deepseek-v4-pro` | high | read, grep, find, ls, bash | evidence-backed review |
+Only the packaging is ours: `package.json`, `extensions/index.ts`, `README.md`,
+`scripts/`. The macOS app is a SwiftUI application — its agent library UI, Models
+view, worktrees, issue board, memory and MCP screens are not part of this bundle
+and are not portable to pi.
 
-Models are deliberately tiered by cost vs. intelligence. Edit the `model:` line
-in your agent files to taste.
+## Building on the baseline
 
-## Prompt templates
-
-The macOS app's bundled prompts, byte-identical, available as `/name`:
-
-| Prompt | Argument | Purpose |
-|---|---|---|
-| `/investigate-a-bug` | `<symptom>` | reproduce → isolate → root-cause, no fix yet |
-| `/plan-a-feature` | `<feature>` | end-to-end plan before code |
-| `/refactor-for-clarity` | `<file or area>` | behaviour-preserving refactor plan |
-| `/review-my-changes` | `[focus]` | self-review staged + unstaged diff |
-
-## Skills
-
-The macOS app's bundled skills, byte-identical:
-
-| Skill | Purpose |
-|---|---|
-| `agent-authoring` | create/review Agent Deck agents |
-| `loop-authoring` | create/refine Agent Deck loops |
-| `mcp-install-helper` | install/import/repair MCP servers |
-| `prompt-authoring` | reusable slash prompt templates |
-| `skill-authoring` | create/validate skills |
-
-## Fidelity to the macOS app
-
-The `agents/`, `prompts/` and `skills/` files are **copies of the macOS app's
-`bundled-agents/`, `bundled-prompts/` and `bundled-skills/`** — same bodies,
-same prompt text, same skill instructions. The agent **bodies are byte-identical**
-to upstream.
-
-Two deliberate, documented kinds of change are applied to the agent frontmatter
-only:
-
-1. **Additions** the pi runtime needs and the macOS app keeps outside the file
-   (it stores per-agent models in its own Models view):
-   `model`, `color`, `icon`, `max_turns`, `prompt_mode`, `disallowed_tools`.
-2. **One removal-for-portability**: `contact_supervisor` stays listed in the
-   original `tools:` (kept verbatim) but is additionally placed in
-   `disallowed_tools`, because that tool only exists inside the macOS app.
-
-Everything else — `whenToUse`, `systemPromptMode`, `defaultExpectedOutcome`,
-`defaultReads`, `defaultProgress`, `tools`, `thinking`, and the full body — is
-kept exactly as upstream.
-
-## What the extension does
-
-On load (and on every `session_start`) it copies the bundled `agents/*.md` into
-`$PI_CODING_AGENT_DIR/agents/` (default `~/.pi/agent/agents/`):
-
-- a file that does **not** exist → created
-- a file carrying `managed_by: pi-agentdeck-agents` → refreshed when the package updates
-- a file you wrote yourself (no marker) → **left untouched**
-- `/agentdeck-agents sync` → overwrite everything, including local edits
-
-Nothing else is registered: the actual subagent tools and UI come from the
-runtime extension you installed in step 1.
-
-## Per-agent model resolution
-
-The subagent runtime reads `model:`/`thinking:` from each agent file. To change
-a model, edit the file (or, if you also use the `piagents` CLI, run
-`piagents tier planner cheap && piagents sync`).
+Keep `agents/`, `prompts/` and `skills/` untouched, and add your changes as a new
+version layer (bump `version`, tag, publish). That way
+`npm run verify:fidelity` keeps proving the base is clean, and any diff against
+upstream is a deliberate, reviewable change rather than drift.
 
 ## Files
 
 ```
-extensions/index.ts                 seeding extension (no runtime dependencies)
-agents/{explorer,planner,reviewer}.md
-prompts/{investigate-a-bug,plan-a-feature,refactor-for-clarity,review-my-changes}.md
-skills/{agent-authoring,loop-authoring,mcp-install-helper,prompt-authoring,skill-authoring}/SKILL.md
+agents/{explorer,planner,reviewer}.md            pristine
+prompts/{investigate-a-bug,plan-a-feature,
+         refactor-for-clarity,
+         review-my-changes}.md                   pristine
+skills/{agent-authoring,loop-authoring,
+        mcp-install-helper,prompt-authoring,
+        skill-authoring}/SKILL.md                pristine
+extensions/index.ts                              seeder (no runtime deps)
+scripts/verify-fidelity.mjs                      hash checker
+upstream.lock.json                               upstream commit + sha256
 ```
-
-The extension seeds the agents; `prompts/` and `skills/` are declared in
-`package.json` (`pi.prompts`, `pi.skills`) so pi loads them straight from the
-package — nothing to copy.
 
 ## License
 
-MIT
+MIT (the bundled resources come from the MIT-licensed Agent Deck app).

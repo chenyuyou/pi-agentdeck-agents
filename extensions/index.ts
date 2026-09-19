@@ -1,26 +1,22 @@
 /**
  * pi-agentdeck-agents
  *
- * Installs the bundled Agent Deck style agents (explorer / planner / reviewer)
- * into pi's global agent directory so a pi subagent extension can discover them
- * in every project, on every machine.
+ * Installs the bundled Agent Deck resources into pi's global agent directory so
+ * a pi subagent extension can discover them in every project, on every machine.
  *
- * The files are the same Markdown + YAML frontmatter format used by the macOS
- * Agent Deck app and by @tintinweb/pi-subagents / @gotgenes/pi-subagents.
- *
- * Seeding rules:
- *   - never touched: a file that exists and was not created by this package
- *   - updated:       a file carrying our marker comment (safe to refresh)
- *   - forced:        `pi` command `/agentdeck-agents sync` (overwrites either way)
+ * FIDELITY: the files under ../agents, ../prompts and ../skills are byte-identical
+ * copies of the macOS Agent Deck app's bundled resources (see upstream.lock.json
+ * and scripts/verify-fidelity.mjs). This extension never rewrites their content:
+ * it copies them as-is, and it never overwrites a file that already exists unless
+ * you explicitly run `/agentdeck-agents sync`.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-const MARKER = "managed_by: pi-agentdeck-agents";
 const PKG = "pi-agentdeck-agents";
 
 function agentRootDir(): string {
@@ -34,41 +30,37 @@ function bundledAgentsDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "agents");
 }
 
-/** Copy bundled agents into the global agent dir. Returns the files written. */
-function seed(force = false): string[] {
+/** Copy bundled agents into the global agent dir. Existing files win unless force. */
+function seed(force = false): { written: string[]; skipped: string[] } {
   const src = bundledAgentsDir();
-  if (!existsSync(src)) return [];
+  const written: string[] = [];
+  const skipped: string[] = [];
+  if (!existsSync(src)) return { written, skipped };
+
   const dst = agentRootDir();
   mkdirSync(dst, { recursive: true });
 
-  const written: string[] = [];
   for (const file of readdirSync(src).filter((f) => f.endsWith(".md")).sort()) {
-    const source = readFileSync(join(src, file), "utf8");
     const target = join(dst, file);
-    if (!existsSync(target)) {
-      writeFileSync(target, source, "utf8");
-      written.push(file);
+    if (existsSync(target) && !force) {
+      skipped.push(file);
       continue;
     }
-    const current = readFileSync(target, "utf8");
-    if (current === source) continue;
-    // Only refresh files this package owns, unless forced.
-    if (force || current.includes(MARKER)) {
-      writeFileSync(target, source, "utf8");
-      written.push(file);
-    }
+    writeFileSync(target, readFileSync(join(src, file), "utf8"), "utf8");
+    written.push(file);
   }
-  return written;
+  return { written, skipped };
 }
 
-function report(ctx: ExtensionContext, written: string[], force: boolean): void {
-  if (!written.length) return;
+function report(ctx: ExtensionContext, result: { written: string[]; skipped: string[] }): void {
   if (!ctx.hasUI) return;
-  ctx.ui.notify(`${PKG}: ${force ? "installed" : "updated"} ${written.join(", ")} → ${agentRootDir()}`, "info");
+  if (result.written.length) {
+    ctx.ui.notify(`${PKG}: installed ${result.written.join(", ")} → ${agentRootDir()}`, "info");
+  }
 }
 
 export default function (pi: ExtensionAPI) {
-  // Seed at load time so the agents exist before any session-level discovery.
+  // Seed at load time so agents exist before any session-level discovery.
   try {
     seed();
   } catch {
@@ -77,23 +69,21 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     try {
-      report(ctx, seed(), false);
+      report(ctx, seed());
     } catch {
       /* ignore */
     }
   });
 
   pi.registerCommand("agentdeck-agents", {
-    description: `Reinstall the bundled ${PKG} agent files (use "sync" to overwrite local edits)`,
+    description: `Show or (re)install the bundled ${PKG} agents ("sync" overwrites local copies)`,
     handler: async (args, ctx) => {
       const force = (args ?? "").trim() === "sync";
-      const written = seed(force);
-      ctx.ui.notify(
-        written.length
-          ? `${PKG}: wrote ${written.join(", ")} → ${agentRootDir()}`
-          : `${PKG}: agents already up to date`,
-        "info",
-      );
+      const { written, skipped } = seed(force);
+      const msg = written.length
+        ? `${PKG}: wrote ${written.join(", ")} → ${agentRootDir()}`
+        : `${PKG}: agents already present (${skipped.join(", ") || "none"}); run with "sync" to overwrite`;
+      ctx.ui.notify(msg, "info");
     },
   });
 }

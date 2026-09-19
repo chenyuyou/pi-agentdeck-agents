@@ -1,0 +1,24 @@
+{
+  "repository": "a-streetcoder/agent-deck",
+  "commit": "9efbe6c1dc2a60cf1eec79fed22676b40b6d6ac7",
+  "sourceDirs": [
+    "agent-deck/bundled-agents",
+    "agent-deck/bundled-prompts",
+    "agent-deck/bundled-skills"
+  ],
+  "note": "Files below are byte-identical copies of the macOS Agent Deck app's bundled resources at this commit. Do not edit them in place; add a new version layer instead.",
+  "files": {
+    "agents/explorer.md": "adf078174fa91e3c6e42a3309fb63821862ad1e96edcda54b464dfe305cae6d4",
+    "agents/planner.md": "7dc837d1a13c014262114d617404fe0ed44c4a3adc1e633866a3e11ebdfaceec",
+    "agents/reviewer.md": "11db72e8c9d9ee09cd6b59cb6af1d3ea80e68bd691aafa164f87cf549da26648",
+    "prompts/investigate-a-bug.md": "56c73a5432ec2f1b275bbf832c9762d27b0bd4991e838d1252b76a5d941a1adc",
+    "prompts/plan-a-feature.md": "7cfaeab13eaee003ec2d18544497ad333370830195b50d00bc7f83c2f94870ab",
+    "prompts/refactor-for-clarity.md": "f343cd8b0557cbed441c5c3230d41946d84e78dd4de71327b2f0423cf914ec78",
+    "prompts/review-my-changes.md": "1ac6f6746a2e652840c86b5dcef0b329fabdd50173e840aa4366e371f87ca864",
+    "skills/agent-authoring/SKILL.md": "631375253e1f9394c78e165748720db0912a3152ed7c2792479121e0127d0bf5",
+    "skills/loop-authoring/SKILL.md": "6ba98cd60e2572678f7c75b3940f2df9af6a4ba05441812da1bb4315504827a6",
+    "skills/mcp-install-helper/SKILL.md": "cdfd9bdc62a7b07aab2609068489360b2bc57c90e0836e459c3ddbd1ff0be2c2",
+    "skills/prompt-authoring/SKILL.md": "2d16ec275a12df3e1eb0211c8f68b13efc2ed0af40c5725e6bed113ddb5da805",
+    "skills/skill-authoring/SKILL.md": "f53ae48d9f9d7c9adea813ecc7abf8fa865f2bcc897e36f27e45565c98c9b6a1"
+  }
+}
