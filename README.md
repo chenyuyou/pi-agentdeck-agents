@@ -51,7 +51,9 @@ Restart pi afterwards; `/agentdeck doctor` checks the setup.
 | `/agentdeck sync` | re-install the agents from baseline + overlay |
 | `/agentdeck doctor` | agents dir, baseline hash status, runtime presence, supervisor tool, scope, auto-review state |
 | `/agentdeck autoreview on\|off` | turn the automatic post-edit review on or off |
+| `/agentdeck tooldesc on\|off` | inject (or stop injecting) the routing rules into the Agent tool description |
 | `/agentdeck-routing` | print the routing block injected into the system prompt |
+| `/agentdeck-tooldesc sync` | regenerate the Agent tool description now |
 
 ## Orchestration
 
@@ -73,6 +75,39 @@ Do not delegate trivial or already-scoped work, and prefer direct tools when the
 ```
 
 Preview it with `/agentdeck-routing`.
+
+### Tool description injection
+
+The same rules are also written into the **Agent tool description** itself — the
+place the model reads when deciding whether to delegate at all — through the
+runtime's supported extension point (`toolDescriptionMode: "custom"` plus
+`<agentDir>/agent-tool-description.md`).
+
+```
+## Routing rules (Agent Deck)
+
+Pick the agent by its role. Match a `whenToUse` before falling back to the type list above:
+
+- `explorer` (opencode-go/deepseek-v4.1-flash): Use only for quick reconnaissance …
+- `planner` (opencode-go/kimi-k2.7-code): Use for non-trivial work that needs an implementation approach …
+- `reviewer` (opencode-go/deepseek-v4-pro): Use to review already-proposed plans …
+```
+
+The generated file is upstream's **own** default description (keeping `{{typeList}}`
+and `{{agentDir}}` live, so the agent list never goes stale) plus the routing
+section. `subagents.json` is merged, never overwritten.
+
+Limits and safety:
+
+- The host reads the description **once, at tool registration** → changes apply on
+  the next pi session. `/agentdeck-tooldesc` reports file, mode and whether it wrote.
+- If `toolDescriptionMode` is `compact`, or `custom` with a file that is not ours,
+  the extension **backs off** and leaves your choice alone.
+- Turn it off with `/agentdeck tooldesc off` (restores `toolDescriptionMode: "full"`;
+  the file is kept but ignored).
+- Base template resolution: the installed runtime's own
+  `examples/agent-tool-description.md` when present, else the copy vendored in
+  `templates/`.
 
 ### Auto-review
 
@@ -164,6 +199,7 @@ plus pi-native equivalents (routing, supervisor bridge, model overlay). See
 | `v0.2.0` | per-agent model pins |
 | `v0.3.0` | supervisor bridge, tool mapping, tiers, `/route`, `/agentdeck`, pi-native prompts & skills, CI + upstream watch |
 | `v0.4.0` | orchestration: `whenToUse` routing hints + optional auto-review after edits |
+| `v0.5.0` | routing rules injected into the Agent tool description (`toolDescriptionMode: custom`) |
 
 ## License
 

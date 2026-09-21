@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 — routing rules in the Agent tool description
+
+The v0.4.0 routing block reached the model via the system prompt. This version also
+puts it where the delegation decision is actually made: the Agent tool description.
+
+- New `extensions/tool-description.ts` generates
+  `<agentDir>/agent-tool-description.md` and merges `toolDescriptionMode: "custom"`
+  into `<agentDir>/subagents.json` (merge, never overwrite).
+- The generated file is upstream's own default description — `{{typeList}}` and
+  `{{agentDir}}` stay live — plus a `## Routing rules (Agent Deck)` section built
+  from each agent's `whenToUse` and model.
+- `/agentdeck tooldesc on|off`, `/agentdeck-tooldesc [sync]`; `/agentdeck doctor`
+  reports `tool desc: custom (injected)`.
+- Safety: backs off from `compact` or a foreign `custom` file; off restores
+  `full`. The host reads the description at tool registration, so changes apply on
+  the next pi session.
+
+Verified: after one session generates the file, the next session's model can quote
+`## Routing rules (Agent Deck)` from its Agent tool description verbatim.
+
 ## 0.4.0 — orchestration: routing hints + auto-review
 
 Two behaviours the macOS app provided at its own layer. Baseline unchanged

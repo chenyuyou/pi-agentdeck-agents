@@ -246,10 +246,10 @@ function baselineHashes(): { ok: number; total: number; bad: string[] } {
 /* Orchestration settings live in one small file, shared with orchestrator.ts. */
 const SETTINGS_FILE = "agentdeck.json";
 
-type OrchestrationSettings = { autoreview: boolean; autoreviewTtlMinutes: number };
+type OrchestrationSettings = { autoreview: boolean; autoreviewTtlMinutes: number; toolRouting: boolean };
 
 function readOrchestrationSettings(): OrchestrationSettings {
-  const fallback: OrchestrationSettings = { autoreview: false, autoreviewTtlMinutes: 10 };
+  const fallback: OrchestrationSettings = { autoreview: false, autoreviewTtlMinutes: 10, toolRouting: true };
   try {
     const raw = JSON.parse(readFileSync(join(agentBaseDir(), SETTINGS_FILE), "utf8")) as Partial<OrchestrationSettings>;
     return {
@@ -258,9 +258,34 @@ function readOrchestrationSettings(): OrchestrationSettings {
         typeof raw.autoreviewTtlMinutes === "number" && raw.autoreviewTtlMinutes > 0
           ? raw.autoreviewTtlMinutes
           : fallback.autoreviewTtlMinutes,
+      toolRouting: typeof raw.toolRouting === "boolean" ? raw.toolRouting : fallback.toolRouting,
     };
   } catch {
     return fallback;
+  }
+}
+
+/** Is the Agent tool description currently ours + active? */
+function toolDescriptionState(): string {
+  try {
+    const file = join(agentBaseDir(), "agent-tool-description.md");
+    const ours = existsSync(file) && readFileSync(file, "utf8").includes("pi-agentdeck-agents:tool-description");
+    const mode = (() => {
+      try {
+        const raw = JSON.parse(readFileSync(join(agentBaseDir(), "subagents.json"), "utf8")) as {
+          toolDescriptionMode?: string;
+        };
+        return raw.toolDescriptionMode ?? "full";
+      } catch {
+        return "full";
+      }
+    })();
+    if (!readOrchestrationSettings().toolRouting) return "disabled";
+    if (mode === "custom" && ours) return "custom (injected)";
+    if (mode === "custom") return "custom (not ours)";
+    return mode;
+  } catch {
+    return "unknown";
   }
 }
 
@@ -384,6 +409,21 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (sub.startsWith("tooldesc")) {
+        const value = sub.replace("tooldesc", "").trim();
+        if (value === "on" || value === "off") {
+          const next = writeOrchestrationSettings({ toolRouting: value === "on" });
+          report(
+            ctx,
+            `${PKG}: Agent tool description routing ${next.toolRouting ? "ON" : "OFF"}` +
+              ` — regenerated automatically; applies on the next pi session`,
+          );
+        } else {
+          report(ctx, `${PKG}: Agent tool description = ${toolDescriptionState()} (use \`/agentdeck tooldesc on|off\`)`);
+        }
+        return;
+      }
+
       if (sub === "doctor") {
         const base = baselineHashes();
         const tools = (() => {
@@ -401,6 +441,8 @@ export default function (pi: ExtensionAPI) {
           `subagent tools:  ${runtime ? "present" : "NOT FOUND — install a subagent runtime"}`,
           `supervisor tool: ${tools.includes(SUPERVISOR_TOOL) ? "registered" : "not registered"}`,
           `auto-review:     ${readOrchestrationSettings().autoreview ? "ON" : "OFF"}`,
+          `tool desc:       ${toolDescriptionState()}`,
+          `routing hints:   injected each turn (see /agentdeck-routing)`,
           `scope:           ${projectRootFromPackage() ? "project-local" : "global"}`,
         ];
         report(ctx, `${PKG} doctor\n${lines.join("\n")}`, runtime ? "info" : "warning");
@@ -415,8 +457,8 @@ export default function (pi: ExtensionAPI) {
       report(
         ctx,
         `${PKG} — ${bundledAgentNames().length} agents (${agentRootDir()})\n${rows.join("\n")}\n` +
-          `auto-review: ${readOrchestrationSettings().autoreview ? "ON" : "OFF"}\n` +
-          `Commands: /route [task] · /agentdeck sync · /agentdeck autoreview on|off · /agentdeck doctor · /agentdeck-routing`,
+          `auto-review: ${readOrchestrationSettings().autoreview ? "ON" : "OFF"} · tool desc: ${toolDescriptionState()}\n` +
+          `Commands: /route [task] · /agentdeck sync · /agentdeck autoreview on|off · /agentdeck tooldesc on|off · /agentdeck doctor · /agentdeck-routing`,
       );
     },
   });
