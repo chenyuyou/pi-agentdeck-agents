@@ -1,9 +1,9 @@
 {
   "$comment": "v0.3.0 overlay. Applied only when agents are installed into the agent dir; agents/, prompts/, skills/ stay byte-identical to upstream. tier -> model, toolMap -> rewrites the app-only `contact_supervisor` tool name to this package's pi implementation.",
   "tiers": {
-    "cheap": { "model": "opencode-go/deepseek-v4.1-flash" },
-    "balanced": { "model": "opencode-go/deepseek-v4-pro" },
-    "genius": { "model": "opencode-go/kimi-k2.7-code" }
+    "cheap": { "model": "opencode-go/muse-spark-1.3-contributor" },
+    "balanced": { "model": "opencode-go/muse-spark-1.3-contributor" },
+    "genius": { "model": "opencode-go/muse-spark-1.3-contributor" }
   },
   "toolMap": {
     "contact_supervisor": "ext:supervisor/contact_supervisor"
