@@ -49,7 +49,54 @@ Restart pi afterwards; `/agentdeck doctor` checks the setup.
 | `/route [task]` | pick a bundled agent (shows its model) and delegate a task to it |
 | `/agentdeck` | list agents, their models and `whenToUse` |
 | `/agentdeck sync` | re-install the agents from baseline + overlay |
-| `/agentdeck doctor` | agents dir, baseline hash status, runtime presence, supervisor tool, scope |
+| `/agentdeck doctor` | agents dir, baseline hash status, runtime presence, supervisor tool, scope, auto-review state |
+| `/agentdeck autoreview on\|off` | turn the automatic post-edit review on or off |
+| `/agentdeck-routing` | print the routing block injected into the system prompt |
+
+## Orchestration
+
+Two behaviours the macOS app provided at its own layer (v0.4.0).
+
+### Routing hints
+
+The app routed the parent session using each agent's `whenToUse`; pi's subagent
+runtime ignores that field entirely. It is injected as a system-prompt section on
+every turn, read live from the agent directory (so it can never go stale):
+
+```text
+AGENT-ROUTING-V1
+Subagent routing rules. Use the Agent tool with `run_in_background: false` when a task matches a role:
+- explorer [opencode-go/deepseek-v4.1-flash]: Use only for quick reconnaissance …
+- planner  [opencode-go/kimi-k2.7-code]: Use for non-trivial work that needs an implementation approach …
+- reviewer [opencode-go/deepseek-v4-pro]: Use to review already-proposed plans …
+Do not delegate trivial or already-scoped work, and prefer direct tools when the target is known.
+```
+
+Preview it with `/agentdeck-routing`.
+
+### Auto-review
+
+After a turn that actually changed files, optionally spawn the bundled `reviewer`
+agent over the change set:
+
+```
+/agentdeck autoreview on      # default is OFF
+```
+
+It spawns through the subagent runtime's cross-extension RPC (no extra model turn
+in the parent) and reports through the normal completion path.
+
+Guards, so this cannot run away:
+
+- **Interactive sessions only** (`tui` / `rpc`). One-shot runs (`pi -p`) skip it —
+  a background agent completing after shutdown would emit on a disposed event
+  bus. Spawned child sessions report a non-interactive mode too, so a subagent's
+  own edits never trigger a nested review.
+- **One review per 10 minutes** (`autoreviewTtlMinutes` in `~/.pi/agent/agentdeck.json`).
+- **Failed edits are ignored** — the file is recorded from `tool_execution_start`
+  and rolled back if the tool errors.
+- Every decision is appended to `~/.pi/agent/agentdeck-autoreview.jsonl`
+  (`edit`, `spawn`, `spawn-reply`, `skipped`, …), so the behaviour is auditable.
 
 ## Supervisor bridge (`contact_supervisor`)
 
@@ -116,6 +163,7 @@ plus pi-native equivalents (routing, supervisor bridge, model overlay). See
 | `v0.1.0` | pristine baseline (byte-identical upstream) |
 | `v0.2.0` | per-agent model pins |
 | `v0.3.0` | supervisor bridge, tool mapping, tiers, `/route`, `/agentdeck`, pi-native prompts & skills, CI + upstream watch |
+| `v0.4.0` | orchestration: `whenToUse` routing hints + optional auto-review after edits |
 
 ## License
 

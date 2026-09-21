@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0 — orchestration: routing hints + auto-review
+
+Two behaviours the macOS app provided at its own layer. Baseline unchanged
+(`verify:fidelity` still 12/12).
+
+- **Routing hints (C)** — the app routed the parent session with each agent's
+  `whenToUse`; pi's subagent runtime ignores that field entirely. It is now
+  injected as a system-prompt section (`sections.agent_routing`) on every turn,
+  read live from the agent directory so it never goes stale. Preview with
+  `/agentdeck-routing`.
+- **Auto-review (B)** — after a turn that actually changed files (`edit`/`write`),
+  optionally spawn the bundled `reviewer` agent over the change set via the
+  subagent runtime's cross-extension RPC. **Off by default**; toggle with
+  `/agentdeck autoreview on|off`. One review per 10 minutes (configurable in
+  `~/.pi/agent/agentdeck.json`); decisions are audited to
+  `~/.pi/agent/agentdeck-autoreview.jsonl`.
+- New extension `extensions/orchestrator.ts`; `/agentdeck` now reports the
+  auto-review state.
+
+Note: pi package manifests must list extension **files** — an `extensions/`
+directory entry only loads `index.ts`.
+
 ## 0.3.0 — pi-native glue
 
 Everything the macOS app provided around its resources, implemented for pi.

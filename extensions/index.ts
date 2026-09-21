@@ -243,6 +243,38 @@ function baselineHashes(): { ok: number; total: number; bad: string[] } {
   return { ok, total, bad };
 }
 
+/* Orchestration settings live in one small file, shared with orchestrator.ts. */
+const SETTINGS_FILE = "agentdeck.json";
+
+type OrchestrationSettings = { autoreview: boolean; autoreviewTtlMinutes: number };
+
+function readOrchestrationSettings(): OrchestrationSettings {
+  const fallback: OrchestrationSettings = { autoreview: false, autoreviewTtlMinutes: 10 };
+  try {
+    const raw = JSON.parse(readFileSync(join(agentBaseDir(), SETTINGS_FILE), "utf8")) as Partial<OrchestrationSettings>;
+    return {
+      autoreview: typeof raw.autoreview === "boolean" ? raw.autoreview : fallback.autoreview,
+      autoreviewTtlMinutes:
+        typeof raw.autoreviewTtlMinutes === "number" && raw.autoreviewTtlMinutes > 0
+          ? raw.autoreviewTtlMinutes
+          : fallback.autoreviewTtlMinutes,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function writeOrchestrationSettings(patch: Partial<OrchestrationSettings>): OrchestrationSettings {
+  const next = { ...readOrchestrationSettings(), ...patch };
+  try {
+    mkdirSync(agentBaseDir(), { recursive: true });
+    writeFileSync(join(agentBaseDir(), SETTINGS_FILE), JSON.stringify(next, null, 2) + "\n", "utf8");
+  } catch {
+    /* best effort */
+  }
+  return next;
+}
+
 export default function (pi: ExtensionAPI) {
   let lastCtx: ExtensionContext | undefined;
 
@@ -334,6 +366,24 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (sub.startsWith("autoreview")) {
+        const value = sub.replace("autoreview", "").trim();
+        if (value === "on" || value === "off") {
+          const next = writeOrchestrationSettings({ autoreview: value === "on" });
+          report(
+            ctx,
+            `${PKG}: auto-review ${next.autoreview ? "ON" : "OFF"}` +
+              (next.autoreview
+                ? ` — after a turn that edits files, the bundled \`reviewer\` agent reviews it (at most one per ${next.autoreviewTtlMinutes} min)`
+                : ""),
+          );
+        } else {
+          const s = readOrchestrationSettings();
+          report(ctx, `${PKG}: auto-review is ${s.autoreview ? "ON" : "OFF"} (use \`/agentdeck autoreview on|off\`)`);
+        }
+        return;
+      }
+
       if (sub === "doctor") {
         const base = baselineHashes();
         const tools = (() => {
@@ -350,6 +400,7 @@ export default function (pi: ExtensionAPI) {
           `baseline:        ${base.ok}/${base.total} identical${base.bad.length ? ` (bad: ${base.bad.join(", ")})` : ""}`,
           `subagent tools:  ${runtime ? "present" : "NOT FOUND — install a subagent runtime"}`,
           `supervisor tool: ${tools.includes(SUPERVISOR_TOOL) ? "registered" : "not registered"}`,
+          `auto-review:     ${readOrchestrationSettings().autoreview ? "ON" : "OFF"}`,
           `scope:           ${projectRootFromPackage() ? "project-local" : "global"}`,
         ];
         report(ctx, `${PKG} doctor\n${lines.join("\n")}`, runtime ? "info" : "warning");
@@ -364,7 +415,8 @@ export default function (pi: ExtensionAPI) {
       report(
         ctx,
         `${PKG} — ${bundledAgentNames().length} agents (${agentRootDir()})\n${rows.join("\n")}\n` +
-          `Commands: /route [task] · /agentdeck sync · /agentdeck doctor`,
+          `auto-review: ${readOrchestrationSettings().autoreview ? "ON" : "OFF"}\n` +
+          `Commands: /route [task] · /agentdeck sync · /agentdeck autoreview on|off · /agentdeck doctor · /agentdeck-routing`,
       );
     },
   });
