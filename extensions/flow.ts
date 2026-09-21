@@ -178,11 +178,14 @@ export default function (pi: ExtensionAPI) {
         resolve(reply?.data?.id);
       });
       try {
+        // description is required: the runtime renders record.description verbatim
+        // and an unset value shows up in the UI as the literal string "undefined".
+        const head = task.replace(/\s+/g, " ").trim().slice(0, 48);
         pi.events.emit("subagents:rpc:spawn", {
           requestId,
           type: kind === "explore" ? "explorer" : kind === "plan" ? "planner" : "reviewer",
           prompt: spawnPrompt(kind, task),
-          options: { runInBackground: true },
+          options: { runInBackground: true, description: `auto: ${kind}${head ? ` — ${head}` : ""}` },
         });
       } catch (err) {
         audit({ action: "spawn-threw", kind, error: String(err) });

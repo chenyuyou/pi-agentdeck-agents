@@ -134,7 +134,14 @@ export default function (pi: ExtensionAPI) {
         }
       });
       try {
-        pi.events.emit("subagents:rpc:spawn", { requestId, type, prompt, options: { runInBackground: true } });
+        // description is required: the runtime renders record.description verbatim
+        // and an unset value shows up in the UI as the literal string "undefined".
+        pi.events.emit("subagents:rpc:spawn", {
+          requestId,
+          type,
+          prompt,
+          options: { runInBackground: true, description: `loop ${run.phase}: ${run.goal.replace(/\s+/g, " ").trim().slice(0, 44)}` },
+        });
       } catch (err) {
         if (ctx.hasUI) ctx.ui.notify(`${PKG} loop: spawn threw (${String(err)})`, "warning");
         resolve(undefined);

@@ -331,11 +331,15 @@ export default function (pi: ExtensionAPI) {
     ].join("\n");
 
     try {
+      // description is required: the runtime renders record.description verbatim
+      // and an unset value shows up in the UI as the literal string "undefined".
+      const label =
+        list.length <= 2 ? list.map((f) => f.split("/").pop()).join(", ") : `${list.length} files`;
       pi.events.emit("subagents:rpc:spawn", {
         requestId,
         type: "reviewer",
         prompt,
-        options: { runInBackground: true },
+        options: { runInBackground: true, description: `auto-review: ${label}` },
       });
     } catch (err) {
       audit({ action: "spawn-threw", error: String(err) });
