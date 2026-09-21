@@ -14,6 +14,11 @@ Three layers, kept deliberately separate:
 
 `npm run verify:fidelity` proves the baseline is untouched at any time.
 
+→ **[docs/FEATURES.md](docs/FEATURES.md)** walks through every feature: the agent
+library, model tiers/fallbacks, the routing catalog, delegation policy,
+task-adaptive auto-start, plan gate, auto-review, supervisor bridge, loops, and
+the safety/cost guards.
+
 ## Install
 
 ```bash
