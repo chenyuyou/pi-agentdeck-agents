@@ -83,6 +83,9 @@ export function classify(text: string): { kind: Classification; why: string } {
   const t = text.trim();
   if (!t) return { kind: "none", why: "empty" };
   if (t.startsWith("/")) return { kind: "none", why: "slash command" };
+  // Already an explicit delegation instruction — do not start a second agent.
+  if (/\b(agent tool|subagent_type)\b|用\s*(explorer|planner|reviewer)|派给|让\s*(explorer|planner|reviewer)/i.test(t))
+    return { kind: "none", why: "explicit delegation instruction" };
   const words = t.split(/\s+/).length;
   const strong = RE.implStrong.test(t);
   const heavy = RE.implHeavy.test(t);

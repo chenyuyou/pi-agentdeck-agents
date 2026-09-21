@@ -1,6 +1,6 @@
 {
   "name": "pi-agentdeck-agents",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "The macOS Agent Deck app's bundled agents, prompts and skills for the pi coding agent \u2014 byte-identical baseline plus a pi-native overlay (per-agent models, supervisor tool, routing).",
   "keywords": [
     "pi-package",
@@ -58,7 +58,8 @@
       "./extensions/supervisor.ts",
       "./extensions/orchestrator.ts",
       "./extensions/tool-description.ts",
-      "./extensions/flow.ts"
+      "./extensions/flow.ts",
+      "./extensions/loop.ts"
     ],
     "prompts": [
       "./prompts",

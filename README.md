@@ -54,6 +54,8 @@ Restart pi afterwards; `/agentdeck doctor` checks the setup.
 | `/agentdeck tooldesc on\|off` | inject (or stop injecting) the routing rules into the Agent tool description |
 | `/agentdeck-routing` | print the routing block injected into the system prompt |
 | `/agentdeck-tooldesc sync` | regenerate the Agent tool description now |
+| `/agentdeck-answer [<id> <answer>]` | list or answer pending subagent requests |
+| `/agentdeck-loop <goal> \| status \| stop` | run Analyze→Fix→Validate |
 
 ## Orchestration
 
@@ -172,24 +174,60 @@ Guards, so this cannot run away:
 ## Supervisor bridge (`contact_supervisor`)
 
 Upstream agents list `contact_supervisor` in `tools:` and their prompts say "ask
-the supervisor one focused question". The macOS app ships a bridge extension for
-it; **pi had no such tool**. `extensions/supervisor.ts` implements it:
+the supervisor one focused question". The macOS app ships a bridge extension with
+**both halves** — a child tool and parent-side request tools. Ours now matches
+(`extensions/supervisor.ts`):
 
-- the child emits a `progress` / `question` / `blocker` message,
-- it is appended to `$PI_CODING_AGENT_DIR/agentdeck-supervisor.jsonl` and emitted
-  on pi's shared event bus,
-- the supervising session shows a notification and records an entry.
+| Side | Tool | Behaviour |
+|---|---|---|
+| child | `contact_supervisor(kind, message, options?)` | `progress` returns at once; `question`/`blocker` create a pending request and **wait** for an answer (default 180s), then continue |
+| parent | `list_supervisor_requests` | list what children are waiting on |
+| parent | `answer_supervisor_request(requestId, answer)` | unblock that child with the decision |
+| human | `/agentdeck-answer [<id> <answer>]` | answer without going through the model |
 
-Non-blocking by design: the child continues with its best judgement. The overlay
-rewrites the app-only plain tool name to pi's selector —
+Transport is a small JSON store (`~/.pi/agent/agentdeck-supervisor-requests.json`)
+that the waiting child polls and the parent writes — so it works whether the
+agent runner is in-process or a separate process. On timeout the child is told to
+proceed with its recommendation and state the assumption, so an unattended run
+never stalls.
 
 ```
-tools: read, grep, find, ls, bash, contact_supervisor      # upstream (plain name: a pi typo)
-tools: read, grep, find, ls, bash, ext:supervisor/contact_supervisor   # installed
+↩︎ pi-agentdeck-agents question: Which module should I inspect first? [src | test] — answer: /agentdeck-answer sup-muarupui-wk0m <text>
 ```
 
-— which is also what removes the `tools-error: ... is not a known built-in`
-warning upstream agents would otherwise produce.
+The overlay also rewrites the app-only plain tool name to pi's selector, which is
+what removes the `tools-error: … is not a known built-in` warning upstream agents
+would otherwise produce:
+
+```
+tools: read, grep, find, ls, bash, contact_supervisor                    # upstream (plain name: a pi typo)
+tools: read, grep, find, ls, bash, ext:supervisor/contact_supervisor    # installed
+```
+
+## Loops (Analyze → Fix → Validate)
+
+The app's deterministic multi-step orchestration
+([`concepts/loops.md`](https://github.com/a-streetcoder/agent-deck/blob/main/agent-deck-documentation/concepts/loops.md))
+is available as `/agentdeck-loop`:
+
+```
+/agentdeck-loop <goal>     # analyze (planner) → fix (maker) → validate, up to N iterations
+/agentdeck-loop status     # current run
+/agentdeck-loop stop       # abort after the in-flight step
+```
+
+It is **user-launched**, matching the app's stance (its loops are not automatic
+either). Configure in `~/.pi/agent/agentdeck.json`:
+
+```json
+{ "loop": { "command": "npm test", "maker": "general-purpose", "maxIterations": 3, "stepTimeoutSeconds": 900 } }
+```
+
+Each step consumes the previous one: the planner's returned plan is fed to the
+maker, and a failing validation's output is fed back into the next maker attempt.
+Runs are written to `~/.pi/agent/agentdeck-loop/<run>.json` (goal, plan, steps,
+validation output, outcome). Without a `command` the loop stops after the maker
+step and says so — validation is never silently assumed.
 
 ## Model tiers
 
@@ -224,8 +262,8 @@ moves; `scripts/rebaseline.mjs` does the same locally. See [`UPSTREAM.md`](./UPS
 
 The app is a SwiftUI application: agent library UI, Models view, worktrees, issue
 board, memory and MCP screens are not portable. This bundle carries the resources
-plus pi-native equivalents (routing, supervisor bridge, model overlay). See
-[`NOTICE`](./NOTICE) for attribution.
+plus pi-native equivalents (catalog + delegation policy, supervisor request/answer,
+loops, model overlay). See [`NOTICE`](./NOTICE) for attribution.
 
 ## Versioning
 
@@ -237,6 +275,7 @@ plus pi-native equivalents (routing, supervisor bridge, model overlay). See
 | `v0.4.0` | orchestration: `whenToUse` routing hints + optional auto-review after edits |
 | `v0.5.0` | routing rules injected into the Agent tool description (`toolDescriptionMode: custom`) |
 | `v0.6.0` | macOS-aligned parent catalog + `light`/`balanced`/`strict` delegation policy; opt-in task-adaptive auto-start and plan gate |
+| `v0.7.0` | complete supervisor request/answer loop (child waits, parent answers) + `Analyze→Fix→Validate` loops |
 
 ## License
 

@@ -285,6 +285,26 @@ function readOrchestrationSettings(): OrchestrationSettings {
   }
 }
 
+/** Loop + supervisor knobs live in the same settings file. */
+function readLoopInfo(): { command: string; maker: string; maxIterations: number; supervisorTimeoutSeconds?: number } {
+  const fallback = { command: "", maker: "general-purpose", maxIterations: 3 };
+  try {
+    const raw = JSON.parse(readFileSync(join(agentBaseDir(), SETTINGS_FILE), "utf8")) as {
+      loop?: { command?: string; maker?: string; maxIterations?: number };
+      supervisorTimeoutSeconds?: number;
+    };
+    return {
+      command: typeof raw.loop?.command === "string" ? raw.loop.command : fallback.command,
+      maker: typeof raw.loop?.maker === "string" && raw.loop.maker.trim() ? raw.loop.maker : fallback.maker,
+      maxIterations: typeof raw.loop?.maxIterations === "number" ? raw.loop.maxIterations : fallback.maxIterations,
+      supervisorTimeoutSeconds:
+        typeof raw.supervisorTimeoutSeconds === "number" ? raw.supervisorTimeoutSeconds : undefined,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 /** Is the Agent tool description currently ours + active? */
 function toolDescriptionState(): string {
   try {
@@ -333,7 +353,7 @@ export default function (pi: ExtensionAPI) {
   // Supervisor side: surface contact_supervisor messages from child agents.
   try {
     pi.events.on(SUPERVISOR_EVENT, (data: unknown) => {
-      const d = data as { kind?: string; message?: string; options?: string[] };
+      const d = data as { id?: string; kind?: string; message?: string; options?: string[] };
       if (!d?.message) return;
       try {
         pi.appendEntry("agentdeck:supervisor", d);
@@ -343,7 +363,12 @@ export default function (pi: ExtensionAPI) {
       const ctx = lastCtx;
       if (ctx?.hasUI) {
         const opts = d.options?.length ? ` [${d.options.join(" | ")}]` : "";
-        ctx.ui.notify(`↩︎ ${PKG} ${d.kind ?? "message"}: ${d.message}${opts}`, d.kind === "blocker" ? "warning" : "info");
+        const waiting = d.kind === "question" || d.kind === "blocker";
+        const hint = waiting && d.id ? ` — answer: /agentdeck-answer ${d.id} <text>` : "";
+        ctx.ui.notify(
+          `↩︎ ${PKG} ${d.kind ?? "message"}: ${d.message}${opts}${hint}`,
+          d.kind === "blocker" ? "warning" : "info",
+        );
       }
     });
   } catch {
@@ -488,6 +513,8 @@ export default function (pi: ExtensionAPI) {
           `auto-start:      ${readOrchestrationSettings().autoSpawn ? "ON" : "OFF"} (heuristic; /agentdeck-flow)`,
           `plan gate:       ${readOrchestrationSettings().planGate ? "ON" : "OFF"}`,
           `delegation:      ${readOrchestrationSettings().policy} (light|balanced|strict)`,
+          `supervisor:      contact_supervisor + list/answer (waits ${readLoopInfo().supervisorTimeoutSeconds ?? 180}s)`,
+          `loop:            maker=${readLoopInfo().maker} · validation=${readLoopInfo().command || "(none)"} · max=${readLoopInfo().maxIterations}`,
           `routing hints:   injected each turn (see /agentdeck-routing)`,
           `scope:           ${projectRootFromPackage() ? "project-local" : "global"}`,
         ];

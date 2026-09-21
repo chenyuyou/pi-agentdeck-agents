@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.0 — complete supervisor bridge + loops
+
+The two remaining macOS-app capabilities, both implemented the app's way.
+
+Supervisor (`extensions/supervisor.ts`, rewritten)
+
+- child `contact_supervisor`: `progress` is fire-and-forget; `question`/`blocker`
+  create a pending request and **block** until answered (default 180s), then return
+  the answer. On timeout the child proceeds with its recommendation and records the
+  assumption, so unattended runs never stall.
+- parent `list_supervisor_requests` / `answer_supervisor_request`, plus the human
+  shortcut `/agentdeck-answer [<id> <answer>]`.
+- transport is a JSON request store the child polls and the parent writes, so it
+  works for in-process and out-of-process agent runners alike.
+
+Loops (`extensions/loop.ts`)
+
+- `/agentdeck-loop <goal>` runs the app's recommended **Analyze → Fix → Validate**
+  cycle: planner → maker (`general-purpose` by default) → validation command,
+  repeating up to `maxIterations`. The plan feeds the maker; a failing validation's
+  output feeds the next attempt.
+- `/agentdeck-loop status|stop`; run artifacts in `~/.pi/agent/agentdeck-loop/`.
+- user-launched only (the app's loops are not automatic either); no validation
+  command means the loop stops after the maker step and says so.
+
+Also: explicit delegation instructions ("use explorer to …") no longer trigger
+flow's task-adaptive auto-start; `doctor` reports supervisor and loop settings.
+
+Verified end to end: a child asked a question and resumed with
+`SUPERVISOR-SAID=Inspect src first, then test.`; a loop fixed `add(2,3)` in one
+iteration and `node check.mjs` printed PASS.
+
 ## 0.6.0 — aligned with how the macOS app really orchestrates
 
 Read the app's source rather than guessing. Three findings shaped this version:
