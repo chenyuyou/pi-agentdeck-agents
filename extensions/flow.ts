@@ -1,0 +1,344 @@
+/**
+ * flow.ts — task-adaptive orchestration: start the right agent from the shape of
+ * the task, not only when the model happens to feel like delegating.
+ *
+ * This is the macOS Agent Deck app's "parent-session routing rule" made concrete
+ * on pi, using three supported hooks:
+ *
+ *   input              → classify the prompt and (optionally) auto-start an agent
+ *   tool_call          → optionally gate the first edit behind a plan
+ *   subagents:*        → know which agents ran and when they finished
+ *
+ * Classification is heuristic (deterministic, no extra model call). Every
+ * decision is appended to ~/.pi/agent/agentdeck-flow.jsonl so behaviour is
+ * auditable and tunable with `/agentdeck-flow test <text>`.
+ *
+ * Settings live in ~/.pi/agent/agentdeck.json (shared with the other extensions):
+ *   { "autoSpawn": true, "planGate": false }
+ *
+ * Self-contained on purpose (no relative imports) — see orchestrator.ts.
+ */
+
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+const PKG = "pi-agentdeck-agents";
+const EDIT_TOOLS = new Set(["edit", "write"]);
+const MAX_GATE_BLOCKS = 2;
+/** Prefixed onto prompts we inject, so a child session never re-classifies them. */
+const SPAWN_MARKER = "[agentdeck-flow]";
+/** Auto-start and gating only make sense in long-lived sessions. */
+const INTERACTIVE_MODES = new Set(["tui", "rpc"]);
+
+type Classification = "explore" | "plan" | "review" | "none";
+type Settings = { autoSpawn: boolean; planGate: boolean };
+
+function agentDir(): string {
+  const configured = process.env.PI_CODING_AGENT_DIR;
+  return configured && configured.trim() ? configured : join(homedir(), ".pi", "agent");
+}
+
+function readSettings(): Settings {
+  const fallback: Settings = { autoSpawn: true, planGate: false };
+  try {
+    const raw = JSON.parse(readFileSync(join(agentDir(), "agentdeck.json"), "utf8")) as Partial<Settings>;
+    return {
+      autoSpawn: typeof raw.autoSpawn === "boolean" ? raw.autoSpawn : fallback.autoSpawn,
+      planGate: typeof raw.planGate === "boolean" ? raw.planGate : fallback.planGate,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function audit(entry: Record<string, unknown>): void {
+  try {
+    mkdirSync(agentDir(), { recursive: true });
+    appendFileSync(join(agentDir(), "agentdeck-flow.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n", "utf8");
+  } catch {
+    /* best effort */
+  }
+}
+
+/* ------------------------------------------------------------------ classify */
+
+const RE = {
+  review: /\b(review|audit|critique|second opinion)\b|审查|评审|复查|检查一下|有没有问题|帮我看下有没有|代码审查/i,
+  explore:
+    /\b(explore|recon|scout|where is|where's|how does|how do i find|locate|map out|understand the)\b|调研|了解|摸清|梳理|看看.*(结构|实现|流程)|在哪|怎么实现|是什么结构/i,
+  // Strong imperatives: an unambiguous "go change code" signal.
+  implStrong:
+    /\b(implement|add|refactor|migrate|rewrite|fix|upgrade|wire up|integrate)\b|实现一下|实现一个|新增|重构|迁移|改造|修复|加个|加上|改一下|接入|集成/i,
+  // Heavy structural verbs — a typo fix is trivial, a refactor is not.
+  implHeavy: /\b(implement|refactor|migrate|rewrite|upgrade|wire up|integrate)\b|新增|重构|迁移|改造|接入|集成|加个|加上/i,
+  // Weak cues that only count outside an interrogative sentence.
+  implWeak: /\b(change|build|update|extend|support)\b|实现|改|调整|支持/i,
+  interrogative: /(怎么|如何|为什么|是什么|在哪|什么结构|哪个)|\b(how|where|what|why|which)\b/i,
+  trivial: /\b(typo|one[- ]line|rename|whitespace|spelling)\b|错别字|错字|拼写|改个名|改.{0,3}注释|加.{0,3}注释|小改/i,
+};
+
+export function classify(text: string): { kind: Classification; why: string } {
+  const t = text.trim();
+  if (!t) return { kind: "none", why: "empty" };
+  if (t.startsWith("/")) return { kind: "none", why: "slash command" };
+  const words = t.split(/\s+/).length;
+  const strong = RE.implStrong.test(t);
+  const heavy = RE.implHeavy.test(t);
+  const weak = RE.implWeak.test(t);
+  const explore = RE.explore.test(t);
+  const review = RE.review.test(t);
+  const trivial = RE.trivial.test(t);
+  const question = RE.interrogative.test(t);
+
+  if (trivial && !heavy) return { kind: "none", why: "trivial marker" };
+  if (review && !strong) return { kind: "review", why: "review intent" };
+  if (strong) return { kind: "plan", why: explore ? "implementation + exploration" : "implementation intent" };
+  // "how does X work" is reconnaissance, not a change request.
+  if (question && explore) return { kind: "explore", why: "interrogative exploration" };
+  if (weak && !question) return { kind: "plan", why: "implementation cue" };
+  if (explore) return { kind: "explore", why: "exploration intent" };
+  if (t.length >= 120 || words >= 20) return { kind: "plan", why: "long, open-ended request" };
+  return { kind: "none", why: "short and specific" };
+}
+
+/* --------------------------------------------------------------- spawn text */
+
+function spawnPrompt(kind: Exclude<Classification, "none">, task: string): string {
+  if (kind === "explore") {
+    return [
+      SPAWN_MARKER,
+      "Reconnaissance pass for the request below. Report entry points, relevant files, data flow, existing patterns, constraints and unknowns.",
+      "Do not recommend implementation approaches and do not edit files.",
+      "",
+      "Request:",
+      task,
+    ].join("\n");
+  }
+  if (kind === "plan") {
+    return [
+      SPAWN_MARKER,
+      "Produce a concise, evidence-backed implementation plan for the request below: goal and non-goals, recommended approach and why, files/components, ordered steps, risks, validation.",
+      "Do not edit files. The parent session will implement after reading your plan.",
+      "",
+      "Request:",
+      task,
+    ].join("\n");
+  }
+  return [
+    SPAWN_MARKER,
+    "Review the current state of this repository for the request below. Inspect the real diff (`git diff`, `git diff --cached`).",
+    "Report evidence-backed findings: correctness, missed requirements, regressions, missing validation. Do not edit files.",
+    "",
+    "Request:",
+    task,
+  ].join("\n");
+}
+
+/* --------------------------------------------------------------- per-session */
+
+type TaskState = {
+  kind: Classification;
+  planned: boolean;
+  gateBlocks: number;
+  spawnId?: string;
+  autoSpawned: boolean;
+};
+
+const tasks = new Map<string, TaskState>();
+
+function sessionId(ctx: ExtensionContext | undefined): string {
+  try {
+    return String((ctx?.sessionManager as { getSessionId?: () => string })?.getSessionId?.() ?? "unknown");
+  } catch {
+    return "unknown";
+  }
+}
+
+export default function (pi: ExtensionAPI) {
+  /** Spawn through the runtime's cross-extension RPC; resolve with the agent id. */
+  const spawnAgent = (kind: Exclude<Classification, "none">, task: string, ctx: ExtensionContext): Promise<string | undefined> => {
+    return new Promise((resolve) => {
+      const requestId = `flow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const channel = `subagents:rpc:spawn:reply:${requestId}`;
+      let done = false;
+      const unsub = pi.events.on(channel, (raw: unknown) => {
+        done = true;
+        try {
+          if (typeof unsub === "function") unsub();
+        } catch {
+          /* ignore */
+        }
+        const reply = raw as { success?: boolean; data?: { id?: string }; error?: string };
+        audit({ action: "spawn-reply", kind, requestId, success: reply?.success === true, id: reply?.data?.id, error: reply?.error });
+        resolve(reply?.data?.id);
+      });
+      try {
+        pi.events.emit("subagents:rpc:spawn", {
+          requestId,
+          type: kind === "explore" ? "explorer" : kind === "plan" ? "planner" : "reviewer",
+          prompt: spawnPrompt(kind, task),
+          options: { runInBackground: true },
+        });
+      } catch (err) {
+        audit({ action: "spawn-threw", kind, error: String(err) });
+        resolve(undefined);
+        return;
+      }
+      setTimeout(() => {
+        if (done) return;
+        try {
+          if (typeof unsub === "function") unsub();
+        } catch {
+          /* ignore */
+        }
+        audit({ action: "spawn-timeout", kind, requestId });
+        if (ctx.hasUI) ctx.ui.notify(`${PKG}: could not auto-start ${kind} (no subagent runtime?)`, "warning");
+        resolve(undefined);
+      }, 10_000);
+    });
+  };
+
+  /* -- 1. classify each new task and optionally start an agent up front ------ */
+
+  pi.on("input", async (event, ctx) => {
+    const source = String((event as { source?: string }).source ?? "interactive");
+    // Never react to our own injections, and never to mid-run steers.
+    if (source === "extension") return undefined;
+    if ((event as { streamingBehavior?: string }).streamingBehavior) return undefined;
+
+    const sid = sessionId(ctx);
+    const text = String(event.text ?? "");
+    const mode = String((ctx as { mode?: string }).mode ?? "tui");
+
+    // Our own spawn prompts must never be classified again. Child sessions load
+    // this extension too, so without this the planner/reviewer prompts would
+    // recursively try to start more agents (observed: spawn-timeout entries).
+    if (text.includes(SPAWN_MARKER)) {
+      audit({ action: "skip", sessionId: sid, reason: "our own spawn prompt" });
+      return undefined;
+    }
+    if (!INTERACTIVE_MODES.has(mode)) {
+      audit({ action: "skip", sessionId: sid, reason: `non-interactive mode (${mode})`, chars: text.length });
+      return undefined;
+    }
+
+    const { kind, why } = classify(text);
+    const settings = readSettings();
+    const state: TaskState = { kind, planned: false, gateBlocks: 0, autoSpawned: false };
+    tasks.set(sid, state);
+    audit({ action: "classify", sessionId: sid, mode, kind, why, chars: text.length });
+
+    if (!settings.autoSpawn || kind === "none") return undefined;
+
+    state.autoSpawned = true;
+    void spawnAgent(kind, text.trim(), ctx).then((id) => {
+      if (id) {
+        state.spawnId = id;
+        audit({ action: "auto-spawn", sessionId: sid, kind, id });
+        if (ctx.hasUI) ctx.ui.notify(`${PKG}: started \`${kind}\` agent for this task`, "info");
+      }
+    });
+    return undefined; // do not alter the user's prompt
+  });
+
+  /* -- 2. learn when the agents finish (from the runtime's own events) ------- */
+
+  for (const channel of ["subagents:completed", "subagents:failed"]) {
+    pi.events.on(channel, (raw: unknown) => {
+      const data = raw as { id?: string; type?: string; status?: string } | undefined;
+      if (!data?.type) return;
+      // Any planner run satisfies the gate, ours or the model's own.
+      if (data.type === "planner") {
+        for (const state of tasks.values()) {
+          if (state.kind === "plan") state.planned = true;
+        }
+      }
+      audit({ action: channel === "subagents:completed" ? "agent-completed" : "agent-failed", type: data.type, id: data.id });
+    });
+  }
+
+  /* -- 3. optionally gate the first edit behind a plan ----------------------- */
+
+  pi.on("tool_call", async (event, ctx) => {
+    const settings = readSettings();
+    if (!settings.planGate) return undefined;
+    if (!EDIT_TOOLS.has(String(event.toolName ?? ""))) return undefined;
+
+    const sid = sessionId(ctx);
+    const state = tasks.get(sid);
+    if (!state || state.kind !== "plan" || state.planned) return undefined;
+    if (state.gateBlocks >= MAX_GATE_BLOCKS) return undefined; // never deadlock
+
+    state.gateBlocks++;
+    audit({ action: "gate-block", sessionId: sid, tool: event.toolName, attempt: state.gateBlocks });
+    return {
+      block: true,
+      reason:
+        "Plan first: a `planner` agent is producing an implementation plan for this task. " +
+        "Wait for its result (or call the Agent tool with subagent_type \"planner\" yourself), then apply the edits. " +
+        "If you already have a plan, state it in one message and retry — the gate opens after one more attempt.",
+    };
+  });
+
+  /* -- 4. status / tuning surface ------------------------------------------- */
+
+  pi.registerCommand("agentdeck-flow", {
+    description: "Task-adaptive agent flow: status, on/off (auto-start), gate on/off, test <text>",
+    handler: async (args, ctx) => {
+      const raw = (args ?? "").trim();
+      const [cmd, ...rest] = raw.split(/\s+/);
+      const say = (text: string, level: "info" | "warning" = "info") => {
+        if (ctx.hasUI) ctx.ui.notify(text, level);
+        else console.log(text);
+      };
+
+      const patch = (p: Partial<Settings>) => {
+        const next = { ...readSettings(), ...p };
+        try {
+          const current = JSON.parse(readFileSync(join(agentDir(), "agentdeck.json"), "utf8")) as Record<string, unknown>;
+          mkdirSync(agentDir(), { recursive: true });
+          writeFileSync(join(agentDir(), "agentdeck.json"), JSON.stringify({ ...current, ...next }, null, 2) + "\n", "utf8");
+        } catch {
+          /* best effort */
+        }
+        return next;
+      };
+
+      if (cmd === "on" || cmd === "off") {
+        const next = patch({ autoSpawn: cmd === "on" });
+        say(`${PKG}: auto-start agents for new tasks → ${next.autoSpawn ? "ON" : "OFF"}`);
+        return;
+      }
+      if (cmd === "gate") {
+        const value = rest[0];
+        if (value === "on" || value === "off") {
+          const next = patch({ planGate: value === "on" });
+          say(`${PKG}: plan gate → ${next.planGate ? "ON" : "OFF"} (blocks at most ${MAX_GATE_BLOCKS} edit attempts)`);
+        } else {
+          say(`${PKG}: plan gate is ${readSettings().planGate ? "ON" : "OFF"} (\`/agentdeck-flow gate on|off\`)`);
+        }
+        return;
+      }
+      if (cmd === "test") {
+        const sample = rest.join(" ");
+        const { kind, why } = classify(sample);
+        say(`classify(${JSON.stringify(sample)})\n  → ${kind}   (${why})`);
+        return;
+      }
+
+      const s = readSettings();
+      const state = tasks.get(sessionId(ctx));
+      const lines = [
+        `${PKG} flow`,
+        `auto-start:  ${s.autoSpawn ? "ON" : "OFF"}   (start explorer/planner/reviewer from the task shape)`,
+        `plan gate:   ${s.planGate ? "ON" : "OFF"}   (require a plan before the first edit)`,
+        `this task:   ${state ? `${state.kind}${state.planned ? " · planned" : ""}${state.spawnId ? ` · started ${state.spawnId}` : ""}` : "(none yet)"}`,
+        `log:         ${join(agentDir(), "agentdeck-flow.jsonl")}`,
+        `Commands: /agentdeck-flow on|off · gate on|off · test <text>`,
+      ];
+      say(lines.join("\n"));
+    },
+  });
+}

@@ -51,7 +51,35 @@ function settings(): Settings {
   }
 }
 
-type AgentMeta = { name: string; whenToUse: string; model: string };
+type AgentMeta = { name: string; description: string; whenToUse: string; outcome: string; tools: string };
+
+/** Delegation policy wording mirrors the macOS app (light | balanced | strict). */
+const POLICY_BULLETS: Record<string, string[]> = {
+  light: [
+    "- Act primarily as the coordinator for these agents when delegation would clearly improve the result.",
+    "- Use the Agent tool for separable specialist work, large investigations, parallel research, or tasks where an available agent is clearly a better fit.",
+    "- You may do straightforward implementation, inspection, explanation, and small fixes yourself when delegation would add unnecessary overhead.",
+  ],
+  balanced: [
+    "- Act primarily as the orchestrator: clarify, plan, delegate, supervise, and synthesize results.",
+    "- Delegate substantive implementation, investigation, planning, or review work to a relevant agent by default; work directly only for trivial, low-risk one-off changes where delegation would add unnecessary overhead.",
+    "- Choose the agent whose routing guidance best matches the task and expected outcome.",
+  ],
+  strict: [
+    "- Act primarily as the orchestrator: clarify, plan, delegate, supervise, and synthesize results.",
+    "- For any substantive task, if an available agent could reasonably perform it, delegate it.",
+    "- Work directly only for trivial conversational replies, direct user clarification, plan/status updates, synthesis of agent results, or when no listed agent fits.",
+  ],
+};
+
+function policyName(): string {
+  try {
+    const raw = JSON.parse(readFileSync(join(agentDir(), "agentdeck.json"), "utf8")) as { policy?: string };
+    return raw.policy && POLICY_BULLETS[raw.policy] ? raw.policy : "balanced";
+  } catch {
+    return "balanced";
+  }
+}
 
 function readAgentMeta(): AgentMeta[] {
   const dir = join(agentDir(), "agents");
@@ -65,8 +93,10 @@ function readAgentMeta(): AgentMeta[] {
         (fm.match(new RegExp(`^${k}:\\s*(.+)$`, "m"))?.[1] ?? "").trim().replace(/^["']|["']$/g, "");
       out.push({
         name: get("name") || file.replace(/\.md$/, ""),
+        description: get("description"),
         whenToUse: get("whenToUse"),
-        model: get("model"),
+        outcome: get("defaultExpectedOutcome"),
+        tools: get("tools"),
       });
     } catch {
       /* skip unreadable */
@@ -95,20 +125,35 @@ function baseTemplate(): string {
 }
 
 function routingSection(): string | undefined {
-  const agents = readAgentMeta().filter((a) => a.whenToUse);
+  const agents = readAgentMeta();
   if (agents.length === 0) return undefined;
-  return [
+  const policy = policyName();
+  const lines = [
     MARKER,
     "",
-    "## Routing rules (Agent Deck)",
+    "## Agent Deck orchestration",
     "",
-    "Pick the agent by its role. Match a `whenToUse` before falling back to the type list above:",
+    "Delegation happens only through this tool (`subagent_type`). It is not automatic — if you do not call it, nothing is delegated.",
     "",
-    ...agents.map((a) => `- \`${a.name}\`${a.model ? ` (${a.model})` : ""}: ${a.whenToUse}`),
+    ...POLICY_BULLETS[policy],
+    "- Fresh agents cannot see this conversation, its context, tool results or earlier agents' findings. Every delegation must be self-contained: goal, requirements, constraints, expected output, useful file reads.",
+    "- If you delegate planning to `planner`, convert its returned plan into your own working plan before implementing, unless the user only asked for a report.",
+    "- Trust but verify: an agent's summary describes intent, not outcome.",
     "",
-    "Do not delegate trivial, already-scoped work, or work whose target you already know — use a direct tool.",
-    "Trust but verify: an agent's summary describes intent, not outcome.",
-  ].join("\n");
+    `Choose by role (policy: ${policy}):`,
+    "",
+  ];
+  for (const a of agents) {
+    const routing = (a.whenToUse || a.description || "Use when this specialist fits the task.").trim();
+    const tools = a.tools
+      ? `tools: ${a.tools
+          .split(",")
+          .map((t) => t.trim().replace(/^ext:[^/]+\//, ""))
+          .join(", ")}`
+      : "default tools";
+    lines.push(`- \`${a.name}\`: ${routing} [outcome: ${a.outcome || "reportOnly"}; ${tools}]`);
+  }
+  return lines.join("\n");
 }
 
 /** Build the full custom description: upstream default + routing section. */

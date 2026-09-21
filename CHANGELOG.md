@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0 — aligned with how the macOS app really orchestrates
+
+Read the app's source rather than guessing. Three findings shaped this version:
+
+1. The app injects a **parent catalog prompt** (`AppViewModel.nativeSubagentCatalogPrompt`)
+   containing orchestration rules, a delegation policy, and
+   `- name: whenToUse [outcome: X; tools: …]` lines. Our injections (system prompt
+   and Agent tool description) now use that exact shape.
+2. "When do agents start" is a **prompt policy** (`NativeSubagentDelegationPolicy`:
+   `light` / `balanced` / `strict`, default `balanced`), not a scheduler. Added as
+   `/agentdeck policy`, with the app's own wording.
+3. The app has **no heuristic auto-start**; deterministic multi-step work is
+   user-launched **loops** (Analyze→Fix→Validate, Maker+Checker, pipeline, …).
+   Our task-adaptive auto-start stays, but is explicitly an opt-in extra.
+
+Changed
+
+- catalog text + `[outcome: …; tools: …]` per agent; `ext:` selectors rendered as
+  the plain tool name the app uses.
+- `/agentdeck policy light|balanced|strict`; `doctor` shows `delegation:`.
+- `autoSpawn` now defaults to **false** (the app has no equivalent); `/agentdeck-flow`
+  still enables it.
+
+Fixed
+
+- **Child sessions were classifying their own spawn prompts** and trying to start
+  nested agents (audit showed `spawn-timeout`). Spawned prompts now carry an
+  `[agentdeck-flow]` marker and non-interactive modes are skipped, so the child
+  logs `skip: our own spawn prompt` instead.
+
 ## 0.5.0 — routing rules in the Agent tool description
 
 The v0.4.0 routing block reached the model via the system prompt. This version also

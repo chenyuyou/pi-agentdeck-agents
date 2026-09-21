@@ -80,7 +80,35 @@ function audit(entry: Record<string, unknown>): void {
   }
 }
 
-type AgentMeta = { name: string; description: string; whenToUse: string; model: string };
+type AgentMeta = { name: string; description: string; whenToUse: string; model: string; outcome: string; tools: string };
+
+/** Delegation policy, mirroring the macOS app's light | balanced | strict wording. */
+const POLICY_BULLETS: Record<string, string[]> = {
+  light: [
+    "- Act primarily as the coordinator for these agents when delegation would clearly improve the result.",
+    "- Use the Agent tool for separable specialist work, large investigations, parallel research, or tasks where an available agent is clearly a better fit.",
+    "- You may do straightforward implementation, inspection, explanation, and small fixes yourself when delegation would add unnecessary overhead.",
+  ],
+  balanced: [
+    "- Act primarily as the orchestrator: clarify, plan, delegate, supervise, and synthesize results.",
+    "- Delegate substantive implementation, investigation, planning, or review work to a relevant agent by default; work directly only for trivial, low-risk one-off changes where delegation would add unnecessary overhead.",
+    "- Use the Agent tool for bounded specialist work. Choose the available agent whose routing guidance best matches the task and expected outcome.",
+  ],
+  strict: [
+    "- Act primarily as the orchestrator: clarify, plan, delegate, supervise, and synthesize results.",
+    "- For any substantive task, if an available agent could reasonably perform it, delegate it with the Agent tool.",
+    "- Do not keep implementation, investigation, planning, or review work in the parent merely because you can do it yourself. Work directly only for trivial conversational replies, direct user clarification, plan/status updates, synthesis of agent results, or when no listed agent fits.",
+  ],
+};
+
+function policyName(): string {
+  try {
+    const raw = JSON.parse(readFileSync(join(agentDir(), "agentdeck.json"), "utf8")) as { policy?: string };
+    return raw.policy && POLICY_BULLETS[raw.policy] ? raw.policy : "balanced";
+  } catch {
+    return "balanced";
+  }
+}
 
 /** Minimal frontmatter reader: `key: value` lines at column 0. */
 function readAgentMeta(): AgentMeta[] {
@@ -99,6 +127,8 @@ function readAgentMeta(): AgentMeta[] {
         description: get("description"),
         whenToUse: get("whenToUse"),
         model: get("model"),
+        outcome: get("defaultExpectedOutcome"),
+        tools: get("tools"),
       });
     } catch {
       /* skip unreadable */
@@ -107,17 +137,38 @@ function readAgentMeta(): AgentMeta[] {
   return out;
 }
 
-/** The routing block injected into the system prompt (C). */
+/**
+ * The catalog injected into the system prompt — the same shape the macOS app
+ * appends (`nativeSubagentCatalogPrompt`): orchestration rules + delegation
+ * policy + `Available agents:` lines carrying whenToUse, outcome and tools.
+ */
 function routingBlock(): string | undefined {
-  const agents = readAgentMeta().filter((a) => a.whenToUse);
+  const agents = readAgentMeta();
   if (agents.length === 0) return undefined;
+  const policy = policyName();
   const lines = [
     ROUTING_MARKER,
-    "Subagent routing rules. Use the Agent tool with `run_in_background: false` when a task matches a role:",
-    ...agents.map((a) => `- ${a.name}${a.model ? ` [${a.model}]` : ""}: ${a.whenToUse}`),
-    "Do not delegate trivial or already-scoped work, and prefer direct tools when the target is known.",
-    "Trust but verify: an agent's summary describes intent, not outcome.",
+    "Agent Deck orchestration (parent session):",
+    "- Delegation happens only through the Agent tool (`subagent_type`); it is not automatic — if you do not call it, nothing is delegated.",
+    ...POLICY_BULLETS[policy],
+    "- Fresh agents cannot see this conversation, its context, tool results, or earlier agents' findings. Every delegation must be self-contained: goal, requirements, constraints, expected output, useful file reads.",
+    "- Keep a short plan for multi-step work and update it as steps start, complete, block or change.",
+    "- If you delegate planning to `planner`, convert its returned plan into your own working plan before implementing, unless the user only asked for a report.",
+    "- Trust but verify: an agent's summary describes intent, not outcome.",
+    "",
+    `Available agents (policy: ${policy}):`,
   ];
+  for (const a of agents) {
+    const routing = (a.whenToUse || a.description || "Use when this specialist fits the task.").trim();
+    const tools = a.tools
+      ? `tools: ${a.tools
+          .split(",")
+          .map((t) => t.trim().replace(/^ext:[^/]+\//, ""))
+          .join(", ")}`
+      : "default tools";
+    const outcome = a.outcome || "reportOnly";
+    lines.push(`- ${a.name}: ${routing} [outcome: ${outcome}; ${tools}]`);
+  }
   return lines.join("\n");
 }
 

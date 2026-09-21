@@ -246,10 +246,26 @@ function baselineHashes(): { ok: number; total: number; bad: string[] } {
 /* Orchestration settings live in one small file, shared with orchestrator.ts. */
 const SETTINGS_FILE = "agentdeck.json";
 
-type OrchestrationSettings = { autoreview: boolean; autoreviewTtlMinutes: number; toolRouting: boolean };
+type OrchestrationSettings = {
+  autoreview: boolean;
+  autoreviewTtlMinutes: number;
+  toolRouting: boolean;
+  autoSpawn: boolean;
+  planGate: boolean;
+  policy: string;
+};
+
+const DELEGATION_POLICIES = ["light", "balanced", "strict"];
 
 function readOrchestrationSettings(): OrchestrationSettings {
-  const fallback: OrchestrationSettings = { autoreview: false, autoreviewTtlMinutes: 10, toolRouting: true };
+  const fallback: OrchestrationSettings = {
+    autoreview: false,
+    autoreviewTtlMinutes: 10,
+    toolRouting: true,
+    autoSpawn: false,
+    planGate: false,
+    policy: "balanced",
+  };
   try {
     const raw = JSON.parse(readFileSync(join(agentBaseDir(), SETTINGS_FILE), "utf8")) as Partial<OrchestrationSettings>;
     return {
@@ -259,6 +275,10 @@ function readOrchestrationSettings(): OrchestrationSettings {
           ? raw.autoreviewTtlMinutes
           : fallback.autoreviewTtlMinutes,
       toolRouting: typeof raw.toolRouting === "boolean" ? raw.toolRouting : fallback.toolRouting,
+      autoSpawn: typeof raw.autoSpawn === "boolean" ? raw.autoSpawn : fallback.autoSpawn,
+      planGate: typeof raw.planGate === "boolean" ? raw.planGate : fallback.planGate,
+      policy:
+        typeof raw.policy === "string" && DELEGATION_POLICIES.includes(raw.policy) ? raw.policy : fallback.policy,
     };
   } catch {
     return fallback;
@@ -424,6 +444,29 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (sub.startsWith("policy")) {
+        const value = sub.replace("policy", "").trim().toLowerCase();
+        if (DELEGATION_POLICIES.includes(value)) {
+          writeOrchestrationSettings({ policy: value });
+          report(
+            ctx,
+            `${PKG}: delegation policy → ${value}\n` +
+              (value === "light"
+                ? "  delegate when it clearly helps; the parent may work directly"
+                : value === "balanced"
+                  ? "  delegate substantive work by default; only trivial changes stay in the parent"
+                  : "  delegate anything substantive; the parent orchestrates and synthesizes"),
+          );
+        } else {
+          report(
+            ctx,
+            `${PKG}: delegation policy is ${readOrchestrationSettings().policy} ` +
+              `(use \`/agentdeck policy light|balanced|strict\`)`,
+          );
+        }
+        return;
+      }
+
       if (sub === "doctor") {
         const base = baselineHashes();
         const tools = (() => {
@@ -442,6 +485,9 @@ export default function (pi: ExtensionAPI) {
           `supervisor tool: ${tools.includes(SUPERVISOR_TOOL) ? "registered" : "not registered"}`,
           `auto-review:     ${readOrchestrationSettings().autoreview ? "ON" : "OFF"}`,
           `tool desc:       ${toolDescriptionState()}`,
+          `auto-start:      ${readOrchestrationSettings().autoSpawn ? "ON" : "OFF"} (heuristic; /agentdeck-flow)`,
+          `plan gate:       ${readOrchestrationSettings().planGate ? "ON" : "OFF"}`,
+          `delegation:      ${readOrchestrationSettings().policy} (light|balanced|strict)`,
           `routing hints:   injected each turn (see /agentdeck-routing)`,
           `scope:           ${projectRootFromPackage() ? "project-local" : "global"}`,
         ];
@@ -457,8 +503,8 @@ export default function (pi: ExtensionAPI) {
       report(
         ctx,
         `${PKG} — ${bundledAgentNames().length} agents (${agentRootDir()})\n${rows.join("\n")}\n` +
-          `auto-review: ${readOrchestrationSettings().autoreview ? "ON" : "OFF"} · tool desc: ${toolDescriptionState()}\n` +
-          `Commands: /route [task] · /agentdeck sync · /agentdeck autoreview on|off · /agentdeck tooldesc on|off · /agentdeck doctor · /agentdeck-routing`,
+          `auto-review: ${readOrchestrationSettings().autoreview ? "ON" : "OFF"} · policy: ${readOrchestrationSettings().policy} · tool desc: ${toolDescriptionState()}\n` +
+          `Commands: /route · /agentdeck sync|doctor|policy|autoreview|tooldesc · /agentdeck-flow · /agentdeck-routing`,
       );
     },
   });

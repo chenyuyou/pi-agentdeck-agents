@@ -57,24 +57,55 @@ Restart pi afterwards; `/agentdeck doctor` checks the setup.
 
 ## Orchestration
 
-Two behaviours the macOS app provided at its own layer (v0.4.0).
+Meshed with how the macOS app actually does it (source: `AppViewModel.nativeSubagentCatalogPrompt`,
+`AppSettings.NativeSubagentDelegationPolicy`, `agent-deck-documentation/*`).
 
-### Routing hints
+### The parent catalog (what the model is told)
 
-The app routed the parent session using each agent's `whenToUse`; pi's subagent
-runtime ignores that field entirely. It is injected as a system-prompt section on
-every turn, read live from the agent directory (so it can never go stale):
+The app appends an **agent catalog** to the parent prompt. This package injects the
+same content in two places — the system prompt (each turn, v0.4.0) and the Agent
+tool description (v0.5.0):
 
 ```text
-AGENT-ROUTING-V1
-Subagent routing rules. Use the Agent tool with `run_in_background: false` when a task matches a role:
-- explorer [opencode-go/deepseek-v4.1-flash]: Use only for quick reconnaissance …
-- planner  [opencode-go/kimi-k2.7-code]: Use for non-trivial work that needs an implementation approach …
-- reviewer [opencode-go/deepseek-v4-pro]: Use to review already-proposed plans …
-Do not delegate trivial or already-scoped work, and prefer direct tools when the target is known.
+Agent Deck orchestration (parent session):
+- Delegation happens only through the Agent tool (`subagent_type`); it is not automatic — if you do not call it, nothing is delegated.
+<delegation policy bullets>
+- Fresh agents cannot see this conversation … every delegation must be self-contained.
+- If you delegate planning to `planner`, convert its returned plan into your own working plan before implementing …
+- Trust but verify: an agent's summary describes intent, not outcome.
+
+Available agents (policy: balanced):
+- explorer: <whenToUse> [outcome: reportOnly; tools: read, grep, find, ls, bash, contact_supervisor]
+- planner:  …
+- reviewer: …
 ```
 
-Preview it with `/agentdeck-routing`.
+That `- name: whenToUse [outcome; tools]` line shape is the app's own format.
+
+### Delegation policy
+
+The app's real "when do agents start" knob is a prompt policy, not a scheduler:
+
+| Policy | Meaning |
+|---|---|
+| `light` | delegate when it clearly improves the result; the parent may work directly |
+| `balanced` *(default)* | delegate substantive implementation/investigation/planning/review; only trivial low-risk changes stay in the parent |
+| `strict` | delegate anything substantive; the parent orchestrates and synthesizes |
+
+```
+/agentdeck policy light|balanced|strict
+```
+
+### Beyond the app (opt-in extras)
+
+Two additions the app does not have, both **off by default**:
+
+- `/agentdeck-flow on|off` — heuristically classify each new task and **start the
+  agent immediately** (explore / plan / review) instead of waiting for the model to
+  decide. Deterministic, auditable in `~/.pi/agent/agentdeck-flow.jsonl`; child
+  sessions and one-shot runs are skipped so it can never recurse.
+- `/agentdeck-flow gate on|off` — block the first `edit`/`write` of a non-trivial
+  task until a `planner` run exists (max 2 blocks, never deadlocks).
 
 ### Tool description injection
 
@@ -84,13 +115,18 @@ runtime's supported extension point (`toolDescriptionMode: "custom"` plus
 `<agentDir>/agent-tool-description.md`).
 
 ```
-## Routing rules (Agent Deck)
+## Agent Deck orchestration
 
-Pick the agent by its role. Match a `whenToUse` before falling back to the type list above:
+Delegation happens only through this tool (`subagent_type`). It is not automatic — if you do not call it, nothing is delegated.
 
-- `explorer` (opencode-go/deepseek-v4.1-flash): Use only for quick reconnaissance …
-- `planner` (opencode-go/kimi-k2.7-code): Use for non-trivial work that needs an implementation approach …
-- `reviewer` (opencode-go/deepseek-v4-pro): Use to review already-proposed plans …
+- Act primarily as the orchestrator: clarify, plan, delegate, supervise, and synthesize results.
+- Delegate substantive implementation, investigation, planning, or review work to a relevant agent by default; …
+
+Choose by role (policy: balanced):
+
+- `explorer`: <whenToUse> [outcome: reportOnly; tools: read, grep, find, ls, bash, contact_supervisor]
+- `planner`: …
+- `reviewer`: …
 ```
 
 The generated file is upstream's **own** default description (keeping `{{typeList}}`
@@ -200,6 +236,7 @@ plus pi-native equivalents (routing, supervisor bridge, model overlay). See
 | `v0.3.0` | supervisor bridge, tool mapping, tiers, `/route`, `/agentdeck`, pi-native prompts & skills, CI + upstream watch |
 | `v0.4.0` | orchestration: `whenToUse` routing hints + optional auto-review after edits |
 | `v0.5.0` | routing rules injected into the Agent tool description (`toolDescriptionMode: custom`) |
+| `v0.6.0` | macOS-aligned parent catalog + `light`/`balanced`/`strict` delegation policy; opt-in task-adaptive auto-start and plan gate |
 
 ## License
 
