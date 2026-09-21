@@ -19,9 +19,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -276,6 +276,7 @@ function seed(force = false): { written: string[]; skipped: string[]; healed: st
     const target = join(dst, file);
     const name = file.replace(/\.md$/, "");
     if (!existsSync(target) || force) {
+      if (force && existsSync(target)) backupFile(target);
       writeFileSync(target, applyOverlay(readFileSync(join(src, file), "utf8"), name, overlay), "utf8");
       written.push(file);
       continue;
@@ -361,7 +362,8 @@ type OrchestrationSettings = {
   autoSpawn: boolean;
   planGate: boolean;
   policy: string;
-};
+  budget: { dailyUsd: number };
+}
 
 const DELEGATION_POLICIES = ["light", "balanced", "strict"];
 
@@ -373,6 +375,7 @@ function readOrchestrationSettings(): OrchestrationSettings {
     autoSpawn: false,
     planGate: false,
     policy: "balanced",
+    budget: { dailyUsd: 10 },
   };
   try {
     const raw = JSON.parse(readFileSync(join(agentBaseDir(), SETTINGS_FILE), "utf8")) as Partial<OrchestrationSettings>;
@@ -387,6 +390,13 @@ function readOrchestrationSettings(): OrchestrationSettings {
       planGate: typeof raw.planGate === "boolean" ? raw.planGate : fallback.planGate,
       policy:
         typeof raw.policy === "string" && DELEGATION_POLICIES.includes(raw.policy) ? raw.policy : fallback.policy,
+      budget: {
+        dailyUsd:
+          typeof (raw as unknown as { budget?: { dailyUsd?: unknown } }).budget?.dailyUsd === "number" &&
+          (raw as unknown as { budget?: { dailyUsd?: number } }).budget!.dailyUsd >= 0
+            ? (raw as unknown as { budget?: { dailyUsd?: number } }).budget!.dailyUsd
+            : fallback.budget.dailyUsd,
+      },
     };
   } catch {
     return fallback;
@@ -413,6 +423,36 @@ function readLoopInfo(): { command: string; maker: string; maxIterations: number
   }
 }
 
+type Spend = { date: string; total: number; notified80: boolean; notified100: boolean };
+
+function todayKey(d = new Date()): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function readSpend(): Spend {
+  const fresh = (): Spend => ({ date: todayKey(), total: 0, notified80: false, notified100: false });
+  try {
+    const raw = JSON.parse(readFileSync(join(agentBaseDir(), "agentdeck-spend.json"), "utf8")) as Partial<Spend>;
+    if (raw.date !== todayKey() || typeof raw.total !== "number") return fresh();
+    return {
+      date: raw.date,
+      total: raw.total,
+      notified80: raw.notified80 === true,
+      notified100: raw.notified100 === true,
+    };
+  } catch {
+    return fresh();
+  }
+}
+
+function spendLine(): string {
+  const budget = readOrchestrationSettings().budget.dailyUsd;
+  const spend = readSpend();
+  if (!(budget > 0)) return `spend today:     $${spend.total.toFixed(3)} (no budget set)`;
+  const pct = Math.round((spend.total / budget) * 100);
+  return `spend today:     $${spend.total.toFixed(3)} / $${budget.toFixed(2)} (${pct}%)`;
+}
+
 /** Is the Agent tool description currently ours + active? */
 function toolDescriptionState(): string {
   try {
@@ -437,6 +477,27 @@ function toolDescriptionState(): string {
   }
 }
 
+/** Set the nested budget.dailyUsd while preserving everything else in the file. */
+function writeBudget(dailyUsd: number): void {
+  try {
+    let current: Record<string, unknown> = {};
+    try {
+      current = JSON.parse(readFileSync(join(agentBaseDir(), SETTINGS_FILE), "utf8")) as Record<string, unknown>;
+    } catch {
+      /* no existing file: start from scratch */
+    }
+    const budget = (current.budget ?? {}) as Record<string, unknown>;
+    mkdirSync(agentBaseDir(), { recursive: true });
+    writeFileSync(
+      join(agentBaseDir(), SETTINGS_FILE),
+      JSON.stringify({ ...current, budget: { ...budget, dailyUsd } }, null, 2) + "\n",
+      "utf8",
+    );
+  } catch {
+    /* best effort */
+  }
+}
+
 function writeOrchestrationSettings(patch: Partial<OrchestrationSettings>): OrchestrationSettings {
   const next = { ...readOrchestrationSettings(), ...patch };
   try {
@@ -455,6 +516,47 @@ function writeOrchestrationSettings(patch: Partial<OrchestrationSettings>): Orch
   }
   return next;
 }
+
+/** Backup an agent file before overwriting; keep newest 3 (`name.md.bak.<stamp>`
+ *  deliberately does not end in `.md`, so agent discovery ignores it). */
+function backupFile(path: string): string | undefined {
+  try {
+    if (!existsSync(path)) return undefined;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const dest = `${path}.bak.${stamp}`;
+    writeFileSync(dest, readFileSync(path, "utf8"), "utf8");
+    const dir = dirname(path);
+    const base = basename(path);
+    const olds = readdirSync(dir)
+      .filter((f) => f.startsWith(`${base}.bak.`))
+      .sort();
+    while (olds.length > 3) {
+      const victim = olds.shift();
+      if (!victim) break;
+      try {
+        unlinkSync(join(dir, victim));
+      } catch {
+        /* ignore */
+      }
+    }
+    return dest;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Cap an audit log at ~2000 lines; missing files are fine. */
+function trimLog(path: string, keep = 2000): void {
+  try {
+    const lines = readFileSync(path, "utf8").split("\n");
+    if (lines.length > keep + 200) {
+      writeFileSync(path, lines.slice(-keep).join("\n"), "utf8");
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 
 export default function (pi: ExtensionAPI) {
   let lastCtx: ExtensionContext | undefined;
@@ -493,6 +595,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx;
+    trimLog(join(agentBaseDir(), "agentdeck-flow.jsonl"));
+    trimLog(join(agentBaseDir(), "agentdeck-autoreview.jsonl"));
+    trimLog(join(agentBaseDir(), "agentdeck-supervisor.jsonl"));
+    trimLog(join(agentBaseDir(), "agentdeck-supervisor.log"));
     try {
       const { written, healed } = seed();
       if ((written.length || healed.length) && ctx.hasUI) {
@@ -611,6 +717,25 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (sub.startsWith("budget")) {
+        const value = sub.replace("budget", "").trim().toLowerCase();
+        if (value === "" ) {
+          report(ctx, `${PKG}: ${spendLine()}  (use \`/agentdeck budget <usd-per-day|off>\`)`);
+        } else if (value === "off" || value === "0") {
+          writeBudget(0);
+          report(ctx, `${PKG}: daily budget disabled`);
+        } else {
+          const amount = Number(value);
+          if (!Number.isFinite(amount) || amount < 0) {
+            report(ctx, `${PKG}: usage /agentdeck budget <usd-per-day|off>`, "warning");
+            return;
+          }
+          writeBudget(amount);
+          report(ctx, `${PKG}: daily budget → $${amount.toFixed(2)} (auto features pause at 100%)`);
+        }
+        return;
+      }
+
       if (sub === "doctor") {
         const base = baselineHashes();
         const tools = (() => {
@@ -636,6 +761,7 @@ export default function (pi: ExtensionAPI) {
           `supervisor:      contact_supervisor + list/answer (waits ${readLoopInfo().supervisorTimeoutSeconds ?? 180}s)`,
           `loop:            maker=${readLoopInfo().maker} · validation=${readLoopInfo().command || "(none)"} · max=${readLoopInfo().maxIterations}`,
           `routing hints:   injected each turn (see /agentdeck-routing)`,
+          spendLine(),
           `scope:           ${projectRootFromPackage() ? "project-local" : "global"}`,
         ];
         report(ctx, `${PKG} doctor\n${lines.join("\n")}`, runtime ? "info" : "warning");
@@ -651,7 +777,7 @@ export default function (pi: ExtensionAPI) {
         ctx,
         `${PKG} — ${bundledAgentNames().length} agents (${agentRootDir()})\n${rows.join("\n")}\n` +
           `auto-review: ${readOrchestrationSettings().autoreview ? "ON" : "OFF"} · policy: ${readOrchestrationSettings().policy} · tool desc: ${toolDescriptionState()}\n` +
-          `Commands: /route · /agentdeck sync|doctor|policy|autoreview|tooldesc · /agentdeck-flow · /agentdeck-routing`,
+          `Commands: /route · /agentdeck sync|doctor|policy|autoreview|tooldesc|budget · /agentdeck-flow · /agentdeck-routing`,
       );
     },
   });

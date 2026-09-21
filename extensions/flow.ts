@@ -54,6 +54,93 @@ function readSettings(): Settings {
   }
 }
 
+/* --------------------------------- spend tracking (cost guard) -------------- */
+
+type Spend = { date: string; total: number; notified80: boolean; notified100: boolean };
+
+function todayKey(d = new Date()): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function spendPath(): string {
+  return join(agentDir(), "agentdeck-spend.json");
+}
+
+function readSpend(): Spend {
+  const fresh = (): Spend => ({ date: todayKey(), total: 0, notified80: false, notified100: false });
+  try {
+    const raw = JSON.parse(readFileSync(spendPath(), "utf8")) as Partial<Spend>;
+    if (raw.date !== todayKey() || typeof raw.total !== "number") return fresh();
+    return {
+      date: raw.date,
+      total: raw.total,
+      notified80: raw.notified80 === true,
+      notified100: raw.notified100 === true,
+    };
+  } catch {
+    return fresh();
+  }
+}
+
+function writeSpend(spend: Spend): void {
+  try {
+    mkdirSync(agentDir(), { recursive: true });
+    writeFileSync(spendPath(), JSON.stringify(spend, null, 2) + "\n", "utf8");
+  } catch {
+    /* best effort */
+  }
+}
+
+function readBudgetDaily(): number {
+  try {
+    const raw = JSON.parse(readFileSync(join(agentDir(), "agentdeck.json"), "utf8")) as {
+      budget?: { dailyUsd?: unknown };
+    };
+    const value = raw.budget?.dailyUsd;
+    return typeof value === "number" && value >= 0 ? value : 10;
+  } catch {
+    return 10;
+  }
+}
+
+function addSpend(amount: number): Spend {
+  const spend = readSpend();
+  spend.total = Math.round((spend.total + amount) * 10000) / 10000;
+  writeSpend(spend);
+  return spend;
+}
+
+/**
+ * Returns true when automatic work may proceed. Notifies once per day at 80%
+ * and at 100%, and pauses automatic spawns once the budget is exhausted.
+ * Explicit user actions (model-initiated spawns, /agentdeck-loop) are unaffected.
+ */
+function checkBudget(ctx: ExtensionContext | undefined, why: string): boolean {
+  const budget = readBudgetDaily();
+  if (!(budget > 0)) return true;
+  const spend = readSpend();
+  const pct = spend.total / budget;
+  const notify = (text: string, level: "info" | "warning") => {
+    if (ctx?.hasUI) ctx.ui.notify(text, level);
+    else console.log(text);
+  };
+  if (pct >= 1) {
+    if (!spend.notified100) {
+      spend.notified100 = true;
+      writeSpend(spend);
+      notify(`${PKG}: daily subagent budget exhausted ($${spend.total.toFixed(3)} / $${budget.toFixed(2)}). Pausing automatic spawns.`, "warning");
+    }
+    audit({ action: "budget-paused", why, total: spend.total, budget });
+    return false;
+  }
+  if (pct >= 0.8 && !spend.notified80) {
+    spend.notified80 = true;
+    writeSpend(spend);
+    notify(`${PKG}: daily subagent spend at 80% ($${spend.total.toFixed(3)} / $${budget.toFixed(2)}).`, "warning");
+  }
+  return true;
+}
+
 function audit(entry: Record<string, unknown>): void {
   try {
     mkdirSync(agentDir(), { recursive: true });
@@ -355,6 +442,7 @@ export default function (pi: ExtensionAPI) {
 
     if (!settings.autoSpawn || kind === "none") return undefined;
 
+    if (!checkBudget(ctx, "auto-spawn")) return undefined;
     state.autoSpawned = true;
     void spawnAgent(kind, text.trim(), ctx).then((id) => {
       if (id) {
@@ -370,7 +458,12 @@ export default function (pi: ExtensionAPI) {
 
   for (const channel of ["subagents:completed", "subagents:failed"]) {
     pi.events.on(channel, (raw: unknown) => {
-      const data = raw as { id?: string; type?: string; status?: string } | undefined;
+      const data = raw as {
+        id?: string;
+        type?: string;
+        status?: string;
+        usage?: { cost?: { total?: number } };
+      } | undefined;
       if (!data?.type) return;
       // Any planner run satisfies the gate, ours or the model's own.
       if (data.type === "planner") {
@@ -378,9 +471,15 @@ export default function (pi: ExtensionAPI) {
           if (state.kind === "plan") state.planned = true;
         }
       }
+      const cost = Number(data.usage?.cost?.total ?? 0);
+      if (Number.isFinite(cost) && cost > 0) addSpend(cost);
       audit({ action: channel === "subagents:completed" ? "agent-completed" : "agent-failed", type: data.type, id: data.id });
     });
   }
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    tasks.delete(sessionId(ctx));
+  });
 
   /* -- 3. optionally gate the first edit behind a plan ----------------------- */
 

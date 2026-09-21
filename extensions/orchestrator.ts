@@ -70,6 +70,86 @@ function audit(entry: Record<string, unknown>): void {
   }
 }
 
+/* --------------------------------- spend tracking (cost guard) -------------- */
+
+type Spend = { date: string; total: number; notified80: boolean; notified100: boolean };
+
+function todayKey(d = new Date()): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function spendPath(): string {
+  return join(agentDir(), "agentdeck-spend.json");
+}
+
+function readSpend(): Spend {
+  const fresh = (): Spend => ({ date: todayKey(), total: 0, notified80: false, notified100: false });
+  try {
+    const raw = JSON.parse(readFileSync(spendPath(), "utf8")) as Partial<Spend>;
+    if (raw.date !== todayKey() || typeof raw.total !== "number") return fresh();
+    return {
+      date: raw.date,
+      total: raw.total,
+      notified80: raw.notified80 === true,
+      notified100: raw.notified100 === true,
+    };
+  } catch {
+    return fresh();
+  }
+}
+
+function writeSpend(spend: Spend): void {
+  try {
+    mkdirSync(agentDir(), { recursive: true });
+    writeFileSync(spendPath(), JSON.stringify(spend, null, 2) + "\n", "utf8");
+  } catch {
+    /* best effort */
+  }
+}
+
+function readBudgetDaily(): number {
+  try {
+    const raw = JSON.parse(readFileSync(join(agentDir(), "agentdeck.json"), "utf8")) as {
+      budget?: { dailyUsd?: unknown };
+    };
+    const value = raw.budget?.dailyUsd;
+    return typeof value === "number" && value >= 0 ? value : 10;
+  } catch {
+    return 10;
+  }
+}
+
+/**
+ * Returns true when automatic work may proceed. Notifies once per day at 80%
+ * and at 100%, and pauses automatic spawns once the budget is exhausted.
+ * Explicit user actions are unaffected.
+ */
+function checkBudget(ctx: ExtensionContext | undefined, why: string): boolean {
+  const budget = readBudgetDaily();
+  if (!(budget > 0)) return true;
+  const spend = readSpend();
+  const pct = spend.total / budget;
+  const notify = (text: string, level: "info" | "warning") => {
+    if (ctx?.hasUI) ctx.ui.notify(text, level);
+    else console.log(text);
+  };
+  if (pct >= 1) {
+    if (!spend.notified100) {
+      spend.notified100 = true;
+      writeSpend(spend);
+      notify(`${PKG}: daily subagent budget exhausted ($${spend.total.toFixed(3)} / $${budget.toFixed(2)}). Pausing automatic spawns.`, "warning");
+    }
+    audit({ action: "budget-paused", why, total: spend.total, budget });
+    return false;
+  }
+  if (pct >= 0.8 && !spend.notified80) {
+    spend.notified80 = true;
+    writeSpend(spend);
+    notify(`${PKG}: daily subagent spend at 80% ($${spend.total.toFixed(3)} / $${budget.toFixed(2)}).`, "warning");
+  }
+  return true;
+}
+
 /* --------------------------------------- overlay: reads + fallback models */
 
 function packageRoot(): string {
@@ -307,6 +387,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   /** Preview exactly what gets injected: `/agentdeck-routing`. */
+  pi.on("session_shutdown", async (_event, ctx) => {
+    pendingEdits.delete(sessionId(ctx));
+  });
+
   pi.registerCommand("agentdeck-routing", {
     description: "Show the agent routing block injected into the system prompt",
     handler: async (_args, ctx) => {
@@ -366,6 +450,8 @@ export default function (pi: ExtensionAPI) {
     const files = pendingEdits.get(sid);
     if (!files || files.size === 0) return;
     pendingEdits.delete(sid);
+
+    if (!checkBudget(ctx, "auto-review")) return;
 
     const age = lockAgeMs();
     const ttlMs = settings.autoreviewTtlMinutes * 60_000;

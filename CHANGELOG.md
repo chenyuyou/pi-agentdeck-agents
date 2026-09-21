@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0 — safety + cost guard
+
+- **Backups**: `/agentdeck sync` force-overwrite now saves `name.md.bak.<stamp>`
+  (newest 3 kept; the suffix never ends in `.md` so agent discovery ignores it).
+- **Hygiene**: per-session maps pruned on `session_shutdown`; loop run history
+  capped at 5 finished runs; audit JSONLs trimmed to ~2000 lines on startup.
+- **Daily spend budget** (`agentdeck.json → budget.dailyUsd`, default $10, 0 disables):
+  subagent spend is accumulated from completion events; notify once at 80% and
+  100%; at 100% automatic spawns (flow auto-start, auto-review) pause while
+  explicit user actions are unaffected. `/agentdeck budget` shows, sets, or
+  disables it; `doctor` prints `spend today:`.
+- **`scripts/smoke.sh`**: headless regression battery (verify scripts +
+  extension commands), 10 checks.
+- Fixed: `backupFile`/`trimLog` were defined inside the extension factory while
+  `seed()` called them from module scope (`backupFile is not defined` on sync).
+
 ## 0.8.0 — defaultReads honored + per-agent fallback models
 
 Two mac frontmatter fields the runtime ignores, now honored by the overlay layer.

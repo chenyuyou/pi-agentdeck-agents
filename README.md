@@ -48,8 +48,9 @@ Restart pi afterwards; `/agentdeck doctor` checks the setup.
 |---|---|
 | `/route [task]` | pick a bundled agent (shows its model) and delegate a task to it |
 | `/agentdeck` | list agents, their models and `whenToUse` |
-| `/agentdeck sync` | re-install the agents from baseline + overlay |
-| `/agentdeck doctor` | agents dir, baseline hash status, runtime presence, supervisor tool, scope, auto-review state |
+| `/agentdeck sync` | re-install the agents from baseline + overlay (backs up overwritten files to `*.bak.<stamp>`, keeps 3) |
+| `/agentdeck doctor` | agents dir, baseline + overlay status, runtime, supervisor, auto-review, spend, scope |
+| `/agentdeck budget [<usd-per-day\|off>]` | show or set the daily subagent spend budget |
 | `/agentdeck autoreview on\|off` | turn the automatic post-edit review on or off |
 | `/agentdeck tooldesc on\|off` | inject (or stop injecting) the routing rules into the Agent tool description |
 | `/agentdeck-routing` | print the routing block injected into the system prompt |
@@ -281,6 +282,7 @@ loops, model overlay). See [`NOTICE`](./NOTICE) for attribution.
 | `v0.6.0` | macOS-aligned parent catalog + `light`/`balanced`/`strict` delegation policy; opt-in task-adaptive auto-start and plan gate |
 | `v0.7.0` | complete supervisor request/answer loop (child waits, parent answers) + `Analyze→Fix→Validate` loops |
 | `v0.8.0` | `defaultReads` honored (prompt prefix + catalog `reads:`) + per-agent `fallbackModels` with retry-on-model-error |
+| `v0.9.0` | safety + cost: `.bak` backups on sync, log rotation, memory caps, daily spend budget with auto-pause, `scripts/smoke.sh` |
 
 ## License
 

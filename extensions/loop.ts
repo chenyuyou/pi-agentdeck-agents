@@ -370,6 +370,18 @@ const spawn = (
         ctx.ui.notify(`${PKG} loop ${run.id} finished: ${run.outcome ?? "done"}`, run.outcome?.includes("passed") ? "info" : "warning");
       }
       active = undefined;
+      // Cap memory: keep the 5 most recent finished runs (Map preserves insertion order).
+      const finished = [...runs.values()].filter((r) => r.finished);
+      if (finished.length > 5) {
+        let drop = finished.length - 5;
+        for (const [id, r] of runs) {
+          if (drop <= 0) break;
+          if (r.finished) {
+            runs.delete(id);
+            drop--;
+          }
+        }
+      }
     }
   };
 
