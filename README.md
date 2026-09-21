@@ -229,19 +229,23 @@ Runs are written to `~/.pi/agent/agentdeck-loop/<run>.json` (goal, plan, steps,
 validation output, outcome). Without a `command` the loop stops after the maker
 step and says so — validation is never silently assumed.
 
-## Model tiers
+## Model tiers, fallbacks, and read-first files
 
-`models.json` supplies the per-agent models the app keeps in its Models UI:
+`models.json` supplies what the app keeps in its Models UI:
 
-| Agent | Tier | Model |
-|---|---|---|
-| `explorer` | `cheap` | `opencode-go/deepseek-v4.1-flash` |
-| `reviewer` | `balanced` | `opencode-go/deepseek-v4-pro` |
-| `planner` | `genius` | `opencode-go/kimi-k2.7-code` |
+- **tier → model** per agent, plus optional per-agent `model` / `thinking` /
+  `toolsAppend` overrides. Edit, then `/agentdeck sync`.
+- **`fallbackModels`**: ordered failover chain per agent (`explorer→…`, `planner→…`,
+  `reviewer→…` — see `models.json`). On a model-looking spawn error the extension
+  retries with the next entry and audits each attempt; other errors fail fast.
+- **`defaultReads`**: two mac fields the runtime ignores (`planner: context.md`,
+  `reviewer: plan.md, progress.md`) are honored here — every prompt this package
+  builds (auto-spawn, auto-review, loop analyze) starts with "read these first if
+  present", and both injected catalogs show them as `reads:` so
+  model-initiated spawns see them too.
 
-Thinking levels stay exactly as upstream. Edit `models.json` (a `model` or a
-`tier`, plus optional `thinking` / `toolsAppend`), then `/agentdeck sync`.
-`npm run verify:models` prints each pin and its `$/Mtok`.
+Thinking levels stay exactly as upstream unless you pin `thinking`.
+`npm run verify:models` prints each chain (`model ~fallback …`) with `$/Mtok`.
 
 ## Verify
 
@@ -276,6 +280,7 @@ loops, model overlay). See [`NOTICE`](./NOTICE) for attribution.
 | `v0.5.0` | routing rules injected into the Agent tool description (`toolDescriptionMode: custom`) |
 | `v0.6.0` | macOS-aligned parent catalog + `light`/`balanced`/`strict` delegation policy; opt-in task-adaptive auto-start and plan gate |
 | `v0.7.0` | complete supervisor request/answer loop (child waits, parent answers) + `Analyze→Fix→Validate` loops |
+| `v0.8.0` | `defaultReads` honored (prompt prefix + catalog `reads:`) + per-agent `fallbackModels` with retry-on-model-error |
 
 ## License
 

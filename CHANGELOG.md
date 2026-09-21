@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.0 — defaultReads honored + per-agent fallback models
+
+Two mac frontmatter fields the runtime ignores, now honored by the overlay layer.
+Baseline still byte-identical (`verify:fidelity` 12/12).
+
+- **`defaultReads`**: planner declares `context.md`, reviewer declares
+  `plan.md, progress.md`. It is now prepended ("read first if present") to every
+  prompt this package builds — auto-spawn, auto-review, and the loop's analyze
+  step — and shown as `reads:` in both injected catalogs, so model-initiated
+  spawns see it too.
+- **`fallbackModels`**: per-agent ordered failover chain in `models.json`
+  (explorer→deepseek-v4.1-flash, planner→deepseek-v4-pro,
+  reviewer→deepseek-v4.1-flash). On a model-looking spawn error the extension
+  retries with the next fallback and audits each attempt; other errors fail fast.
+- `verify:models` prints each chain (`model ~fallback`) and checks every entry.
+
 ## 0.7.0 — complete supervisor bridge + loops
 
 The two remaining macOS-app capabilities, both implemented the app's way.

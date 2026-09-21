@@ -35,6 +35,8 @@ for (const [provider, body] of Object.entries(store)) {
   }
 }
 
+const money = (c) => (c ? `$${c.input ?? "?"}/$${c.output ?? "?"}` : "?/?");
+
 let missing = 0;
 for (const name of Object.keys(overlay.agents ?? {})) {
   const model = resolveModel(name);
@@ -42,16 +44,17 @@ for (const name of Object.keys(overlay.agents ?? {})) {
     console.log(`-     ${name.padEnd(9)} (inherit parent)`);
     continue;
   }
-  const cost = costs.get(model);
-  if (cost) {
-    const inCost = cost.input ?? "?";
-    const outCost = cost.output ?? "?";
-    console.log(`ok    ${name.padEnd(9)} ${model.padEnd(34)} $${inCost}/$${outCost} per Mtok`);
+  const chain = [model, ...((overlay.agents?.[name]?.fallbackModels ?? []).filter((m) => typeof m === "string"))];
+  const bad = chain.filter((m) => !costs.has(m));
+  missing += bad.length;
+  const shown = chain.map((m, i) => (i === 0 ? m : `~${m}`)).join(" ");
+  if (bad.length === 0) {
+    console.log(`ok    ${name.padEnd(9)} ${shown.padEnd(40)} ${money(costs.get(model))} per Mtok`);
   } else {
-    missing++;
-    console.log(`MISS  ${name.padEnd(9)} ${model} not in ${storePath}`);
+    for (const m of bad) console.log(`MISS  ${name.padEnd(9)} ${m} not in ${storePath}`);
+    console.log(`ok    ${name.padEnd(9)} ${shown.padEnd(40)} ${money(costs.get(model))} per Mtok`);
   }
 }
 
-console.log(missing ? `\n${missing} pin(s) unavailable locally` : `\nall pins resolve locally`);
+console.log(missing ? `\n${missing} model(s) unavailable locally` : `\nall pins and fallbacks resolve locally`);
 process.exit(missing ? 1 : 0);

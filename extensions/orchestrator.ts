@@ -19,6 +19,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const PKG = "pi-agentdeck-agents";
@@ -69,7 +70,79 @@ function audit(entry: Record<string, unknown>): void {
   }
 }
 
-type AgentMeta = { name: string; description: string; whenToUse: string; model: string; outcome: string; tools: string };
+/* --------------------------------------- overlay: reads + fallback models */
+
+function packageRoot(): string {
+  try {
+    return join(dirname(fileURLToPath(import.meta.url)), "..");
+  } catch {
+    return "";
+  }
+}
+
+/** Primary model from the overlay (explicit model beats tier). Undefined = inherit. */
+function primaryFor(type: string): string | undefined {
+  try {
+    const root = packageRoot();
+    if (!root) return undefined;
+    const overlay = JSON.parse(readFileSync(join(root, "models.json"), "utf8")) as {
+      tiers?: Record<string, { model?: unknown }>;
+      agents?: Record<string, { model?: unknown; tier?: unknown }>;
+    };
+    const a = overlay.agents?.[type] ?? {};
+    if (typeof a.model === "string" && a.model.trim()) return a.model.trim();
+    if (typeof a.tier === "string") {
+      const m = overlay.tiers?.[a.tier]?.model;
+      if (typeof m === "string" && m.trim()) return m.trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+function fallbacksFor(type: string): string[] {
+  try {
+    const root = packageRoot();
+    if (!root) return [];
+    const overlay = JSON.parse(readFileSync(join(root, "models.json"), "utf8")) as {
+      tiers?: Record<string, { model?: unknown }>;
+      agents?: Record<string, { model?: unknown; tier?: unknown; fallbackModels?: unknown }>;
+    };
+    const list = overlay.agents?.[type]?.fallbackModels;
+    return Array.isArray(list) ? list.filter((m): m is string => typeof m === "string" && !!m.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** defaultReads from the installed agent file (mac field the runtime ignores). */
+function readsFor(type: string): string[] {
+  try {
+    const text = readFileSync(join(agentDir(), "agents", `${type}.md`), "utf8");
+    const m = text.match(/^---\n([\s\S]*?)\n---/);
+    const raw = m ? (m[1].match(/^defaultReads:\s*(.+)$/m)?.[1] ?? "") : "";
+    return raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+const MODEL_ERROR_RE = /model|auth|api key|oauth|unavailable|not found|resolve|scope|thinking|provider/i;
+const isModelError = (error?: string) => !!error && MODEL_ERROR_RE.test(error);
+
+type AgentMeta = {
+  name: string;
+  description: string;
+  whenToUse: string;
+  model: string;
+  outcome: string;
+  tools: string;
+  reads: string;
+};
 
 /** Delegation policy, mirroring the macOS app's light | balanced | strict wording. */
 const POLICY_BULLETS: Record<string, string[]> = {
@@ -118,6 +191,7 @@ function readAgentMeta(): AgentMeta[] {
         model: get("model"),
         outcome: get("defaultExpectedOutcome"),
         tools: get("tools"),
+        reads: get("defaultReads"),
       });
     } catch {
       /* skip unreadable */
@@ -156,7 +230,14 @@ function routingBlock(): string | undefined {
           .join(", ")}`
       : "default tools";
     const outcome = a.outcome || "reportOnly";
-    lines.push(`- ${a.name}: ${routing} [outcome: ${outcome}; ${tools}]`);
+    const reads = a.reads
+      ? `; reads: ${a.reads
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(", ")}`
+      : "";
+    lines.push(`- ${a.name}: ${routing} [outcome: ${outcome}; ${tools}${reads}]`);
   }
   return lines.join("\n");
 }
@@ -297,29 +378,13 @@ export default function (pi: ExtensionAPI) {
     writeLock(list, sid);
     audit({ action: "spawn", sessionId: sid, files: list });
 
-    const requestId = `agentdeck-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const replyChannel = `subagents:rpc:spawn:reply:${requestId}`;
-
-    let settled = false;
-    const unsub = pi.events.on(replyChannel, (raw: unknown) => {
-      settled = true;
-      try {
-        if (typeof unsub === "function") unsub();
-      } catch {
-        /* ignore */
-      }
-      const reply = raw as { success?: boolean; error?: string } | undefined;
-      audit({ action: "spawn-reply", requestId, success: reply?.success === true, error: reply?.error });
-      if (reply?.success !== true && ctx.hasUI) {
-        ctx.ui.notify(`${PKG}: auto-review could not start (${reply?.error ?? "no reply"})`, "warning");
-      }
-    });
-
+    const reads = readsFor("reviewer");
     const prompt = [
       "Review the changes just made in this session. Do not edit files.",
       "",
       "Changed files:",
       ...list.map((f) => `- ${f}`),
+      ...(reads.length ? ["", `Also check these prior-context files if present: ${reads.join(", ")}`] : []),
       "",
       "Inspect the real diff (`git diff`, `git diff --cached`) and report evidence-backed findings:",
       "- correctness and missed requirements",
@@ -329,39 +394,86 @@ export default function (pi: ExtensionAPI) {
       "",
       "Lead with blocking issues. If there is nothing material, say so plainly.",
     ].join("\n");
+    const label =
+      list.length <= 2 ? list.map((f) => f.split("/").pop()).join(", ") : `${list.length} files`;
+    const description = `auto-review: ${label}`;
 
-    try {
-      // description is required: the runtime renders record.description verbatim
-      // and an unset value shows up in the UI as the literal string "undefined".
-      const label =
-        list.length <= 2 ? list.map((f) => f.split("/").pop()).join(", ") : `${list.length} files`;
-      pi.events.emit("subagents:rpc:spawn", {
-        requestId,
-        type: "reviewer",
-        prompt,
-        options: { runInBackground: true, description: `auto-review: ${label}` },
+    const attempt = (model?: string): Promise<{ id?: string; error?: string }> =>
+      new Promise((resolve) => {
+        const requestId = `agentdeck-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const replyChannel = `subagents:rpc:spawn:reply:${requestId}`;
+        let settled = false;
+        const unsub = pi.events.on(replyChannel, (raw: unknown) => {
+          settled = true;
+          try {
+            if (typeof unsub === "function") unsub();
+          } catch {
+            /* ignore */
+          }
+          const reply = raw as { success?: boolean; data?: { id?: string }; error?: string } | undefined;
+          audit({
+            action: "spawn-reply",
+            requestId,
+            model: model ?? "(pin)",
+            success: reply?.success === true,
+            error: reply?.error,
+          });
+          if (reply?.success && reply.data?.id) resolve({ id: reply.data.id });
+          else resolve({ error: reply?.error ?? "no reply from subagent runtime" });
+        });
+        try {
+          // description is required: the runtime renders record.description verbatim
+          // and an unset value shows up in the UI as the literal string "undefined".
+          const options: Record<string, unknown> = { runInBackground: true, description };
+          if (model) options.model = model;
+          pi.events.emit("subagents:rpc:spawn", { requestId, type: "reviewer", prompt, options });
+        } catch (err) {
+          audit({ action: "spawn-threw", error: String(err) });
+          resolve({ error: String(err) });
+          return;
+        }
+        setTimeout(() => {
+          if (settled) return;
+          try {
+            if (typeof unsub === "function") unsub();
+          } catch {
+            /* ignore */
+          }
+          audit({ action: "spawn-timeout", requestId });
+          resolve({ error: "no reply from subagent runtime" });
+        }, 10_000);
       });
-    } catch (err) {
-      audit({ action: "spawn-threw", error: String(err) });
-      return;
-    }
 
-    // No reply usually means no subagent runtime is installed.
-    setTimeout(() => {
-      if (settled) return;
-      try {
-        if (typeof unsub === "function") unsub();
-      } catch {
-        /* ignore */
+    void (async () => {
+      // Explicit primary so a bad pin hard-errors (frontmatter pins only warn
+      // and inherit, which would silently swallow the fallback chain).
+      const seen = new Set<string>();
+      const candidates: Array<string | undefined> = [];
+      for (const m of [primaryFor("reviewer"), ...fallbacksFor("reviewer")]) {
+        const key = m ?? "(inherit)";
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push(m);
       }
-      audit({ action: "spawn-timeout", requestId });
-      if (ctx.hasUI) {
-        ctx.ui.notify(`${PKG}: auto-review got no response — is a subagent runtime installed?`, "warning");
+      if (candidates.length === 0) candidates.push(undefined);
+      for (let i = 0; i < candidates.length; i++) {
+        const result = await attempt(candidates[i]);
+        if (result.id) {
+          if (ctx.hasUI) {
+            ctx.ui.notify(`${PKG}: auto-review started for ${list.length} changed file(s)`, "info");
+          }
+          return;
+        }
+        const next = candidates[i + 1];
+        if (next === undefined || !isModelError(result.error)) {
+          if (ctx.hasUI) {
+            ctx.ui.notify(`${PKG}: auto-review could not start (${result.error ?? "no reply"})`, "warning");
+          }
+          return;
+        }
+        audit({ action: "spawn-fallback", from: candidates[i] ?? "(inherit)", to: next, error: result.error });
+        if (ctx.hasUI) ctx.ui.notify(`${PKG}: model failed, retrying reviewer with ${next}`, "warning");
       }
-    }, 10_000);
-
-    if (ctx.hasUI) {
-      ctx.ui.notify(`${PKG}: auto-review started for ${list.length} changed file(s)`, "info");
-    }
+    })();
   });
 }

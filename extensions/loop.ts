@@ -22,7 +22,8 @@
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const PKG = "pi-agentdeck-agents";
@@ -114,12 +115,73 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  const spawn = (
+/* Overlay helpers: per-agent fallback chains + defaultReads (self-contained). */
+function packageRoot(): string {
+  try {
+    return join(dirname(fileURLToPath(import.meta.url)), "..");
+  } catch {
+    return "";
+  }
+}
+
+function fallbacksFor(type: string): string[] {
+  try {
+    const root = packageRoot();
+    if (!root) return [];
+    const overlay = JSON.parse(readFileSync(join(root, "models.json"), "utf8")) as {
+      agents?: Record<string, { fallbackModels?: unknown }>;
+    };
+    const list = overlay.agents?.[type]?.fallbackModels;
+    return Array.isArray(list) ? list.filter((m): m is string => typeof m === "string" && !!m.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Primary model from the overlay (explicit model beats tier). Undefined = inherit. */
+function primaryFor(type: string): string | undefined {
+  try {
+    const root = packageRoot();
+    if (!root) return undefined;
+    const overlay = JSON.parse(readFileSync(join(root, "models.json"), "utf8")) as {
+      tiers?: Record<string, { model?: unknown }>;
+      agents?: Record<string, { model?: unknown; tier?: unknown }>;
+    };
+    const a = overlay.agents?.[type] ?? {};
+    if (typeof a.model === "string" && a.model.trim()) return a.model.trim();
+    if (typeof a.tier === "string") {
+      const m = overlay.tiers?.[a.tier]?.model;
+      if (typeof m === "string" && m.trim()) return m.trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+function readsFor(type: string): string[] {
+  try {
+    const base =
+      process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
+    const text = readFileSync(join(base, "agents", `${type}.md`), "utf8");
+    const m = text.match(/^---\n([\s\S]*?)\n---/);
+    const raw = m ? (m[1].match(/^defaultReads:\s*(.+)$/m)?.[1] ?? "") : "";
+    return raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+const spawn = (
     type: string,
     prompt: string,
     ctx: ExtensionContext,
     description?: string,
-  ): Promise<string | undefined> =>
+    modelOverride?: string,
+  ): Promise<{ id?: string; error?: string }> =>
     new Promise((resolve) => {
       const requestId = `loop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const channel = `subagents:rpc:spawn:reply:${requestId}`;
@@ -132,27 +194,20 @@ export default function (pi: ExtensionAPI) {
           /* ignore */
         }
         const reply = raw as { success?: boolean; data?: { id?: string }; error?: string };
-        if (reply?.success && reply.data?.id) resolve(reply.data.id);
-        else {
-          if (ctx.hasUI) ctx.ui.notify(`${PKG} loop: could not start ${type} (${reply?.error ?? "no id"})`, "warning");
-          resolve(undefined);
-        }
+        if (reply?.success && reply.data?.id) resolve({ id: reply.data.id });
+        else resolve({ error: reply?.error ?? "no reply from subagent runtime" });
       });
       try {
         // description is required: the runtime renders record.description verbatim
         // and an unset value shows up in the UI as the literal string "undefined".
-        pi.events.emit("subagents:rpc:spawn", {
-          requestId,
-          type,
-          prompt,
-          options: {
-            runInBackground: true,
-            description: description ?? type,
-          },
-        });
+        const options: Record<string, unknown> = {
+          runInBackground: true,
+          description: description ?? type,
+        };
+        if (modelOverride) options.model = modelOverride;
+        pi.events.emit("subagents:rpc:spawn", { requestId, type, prompt, options });
       } catch (err) {
-        if (ctx.hasUI) ctx.ui.notify(`${PKG} loop: spawn threw (${String(err)})`, "warning");
-        resolve(undefined);
+        resolve({ error: String(err) });
         return;
       }
       setTimeout(() => {
@@ -162,9 +217,11 @@ export default function (pi: ExtensionAPI) {
         } catch {
           /* ignore */
         }
-        resolve(undefined);
+        resolve({ error: "no reply from subagent runtime" });
       }, 10_000);
     });
+
+  const MODEL_ERROR_RE = /model|auth|api key|oauth|unavailable|not found|resolve|scope|thinking|provider/i;
 
   const waitFor = (id: string, timeoutMs: number): Promise<{ status?: string; result?: unknown; error?: unknown } | undefined> =>
     new Promise((resolve) => {
@@ -181,13 +238,42 @@ export default function (pi: ExtensionAPI) {
   const runStep = async (run: Run, type: string, prompt: string, ctx: ExtensionContext, note: string) => {
     run.steps.push({ phase: run.phase, iteration: run.iteration, note, at: new Date().toISOString() });
     persist(run, ctx);
-    const id = await spawn(
-      type,
-      prompt,
-      ctx,
-      `loop ${run.phase}: ${run.goal.replace(/\s+/g, " ").trim().slice(0, 44)}`,
-    );
-    if (!id) return undefined;
+    const description = `loop ${run.phase}: ${run.goal.replace(/\s+/g, " ").trim().slice(0, 44)}`;
+    // Explicit primary so a bad pin hard-errors (frontmatter pins only warn
+    // and inherit, which would silently swallow the fallback chain).
+    const seen = new Set<string>();
+    const candidates: Array<string | undefined> = [];
+    for (const m of [primaryFor(type), ...fallbacksFor(type)]) {
+      const key = m ?? "(inherit)";
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(m);
+    }
+    if (candidates.length === 0) candidates.push(undefined);
+    let id: string | undefined;
+    let lastError: string | undefined;
+    for (let i = 0; i < candidates.length; i++) {
+      const result = await spawn(type, prompt, ctx, description, candidates[i]);
+      if (result.id) {
+        id = result.id;
+        break;
+      }
+      lastError = result.error;
+      const next = candidates[i + 1];
+      if (next === undefined || !(lastError && MODEL_ERROR_RE.test(lastError))) break;
+      run.steps.push({
+        phase: run.phase,
+        iteration: run.iteration,
+        note: `model failed, retrying ${type} with ${next}`,
+        at: new Date().toISOString(),
+      });
+      persist(run, ctx);
+      if (ctx.hasUI) ctx.ui.notify(`${PKG} loop: model failed, retrying ${type} with ${next}`, "warning");
+    }
+    if (!id) {
+      if (ctx.hasUI) ctx.ui.notify(`${PKG} loop: could not start ${type} (${lastError ?? "no id"})`, "warning");
+      return undefined;
+    }
     run.steps[run.steps.length - 1].agentId = id;
     persist(run, ctx);
     const settings = loopSettings();
@@ -220,6 +306,7 @@ export default function (pi: ExtensionAPI) {
 
         if (run.iteration === 1) {
           run.phase = "analyze";
+          const reads = readsFor("planner");
           const analysis = await runStep(
             run,
             "planner",
@@ -227,6 +314,9 @@ export default function (pi: ExtensionAPI) {
               "[agentdeck-loop] Analyse this goal and produce an implementation plan.",
               "Include: goal and non-goals, approach and why, files to change, ordered steps, risks, and how to verify.",
               "Do not edit files.",
+              ...(reads.length
+                ? ["", `Read these files first if present (they carry prior context): ${reads.join(", ")}`]
+                : []),
               "",
               `Goal: ${run.goal}`,
             ].join("\n"),

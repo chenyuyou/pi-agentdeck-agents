@@ -1,5 +1,5 @@
 {
-  "$comment": "v0.3.0 overlay. Applied only when agents are installed into the agent dir; agents/, prompts/, skills/ stay byte-identical to upstream. tier -> model, toolMap -> rewrites the app-only `contact_supervisor` tool name to this package's pi implementation.",
+  "$comment": "v0.8.0 overlay. Applied only when agents are installed into the agent dir; agents/, prompts/, skills/ stay byte-identical to upstream. tier -> model, toolMap -> rewrites the app-only `contact_supervisor` tool name to this package's pi implementation, fallbackModels -> per-agent failover chain tried on model errors.",
   "tiers": {
     "cheap": { "model": "opencode-go/muse-spark-1.3-contributor" },
     "balanced": { "model": "opencode-go/muse-spark-1.3-contributor" },
@@ -10,8 +10,8 @@
   },
   "toolAppend": [],
   "agents": {
-    "explorer": { "tier": "cheap" },
-    "planner": { "tier": "genius" },
-    "reviewer": { "tier": "balanced" }
+    "explorer": { "tier": "cheap", "fallbackModels": ["opencode-go/deepseek-v4.1-flash"] },
+    "planner": { "tier": "genius", "fallbackModels": ["opencode-go/deepseek-v4-pro"] },
+    "reviewer": { "tier": "balanced", "fallbackModels": ["opencode-go/deepseek-v4.1-flash"] }
   }
 }

@@ -19,9 +19,10 @@
  * Self-contained on purpose (no relative imports) — see orchestrator.ts.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const PKG = "pi-agentdeck-agents";
@@ -108,10 +109,84 @@ export function classify(text: string): { kind: Classification; why: string } {
 
 /* --------------------------------------------------------------- spawn text */
 
-function spawnPrompt(kind: Exclude<Classification, "none">, task: string): string {
+/* --------------------------------------- overlay: reads + fallback models */
+
+function packageRoot(): string {
+  try {
+    return join(dirname(fileURLToPath(import.meta.url)), "..");
+  } catch {
+    return "";
+  }
+}
+
+type OverlayAgent = { model?: string; tier?: string; thinking?: string; fallbackModels?: string[] };
+type Overlay = { tiers?: Record<string, { model?: string }>; agents?: Record<string, OverlayAgent> };
+
+/** Primary model from the overlay (explicit model beats tier). Undefined = inherit. */
+function primaryFor(type: string): string | undefined {
+  try {
+    const overlay = readOverlay();
+    const a = overlay.agents?.[type] ?? {};
+    if (typeof a.model === "string" && a.model.trim()) return a.model.trim();
+    if (typeof a.tier === "string") {
+      const m = overlay.tiers?.[a.tier]?.model;
+      if (typeof m === "string" && m.trim()) return m.trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+function readOverlay(): Overlay {
+  try {
+    const root = packageRoot();
+    if (!root) return {};
+    return JSON.parse(readFileSync(join(root, "models.json"), "utf8")) as Overlay;
+  } catch {
+    return {};
+  }
+}
+
+function agentTypeName(kind: Exclude<Classification, "none">): string {
+  return kind === "explore" ? "explorer" : kind === "plan" ? "planner" : "reviewer";
+}
+
+function fallbacksFor(type: string): string[] {
+  try {
+    const list = readOverlay().agents?.[type]?.fallbackModels;
+    return Array.isArray(list) ? list.filter((m) => typeof m === "string" && m.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** defaultReads from the installed agent file (mac field the runtime ignores). */
+function readsFor(type: string): string[] {
+  try {
+    const text = readFileSync(join(agentDir(), "agents", `${type}.md`), "utf8");
+    const m = text.match(/^---\n([\s\S]*?)\n---/);
+    const raw = m ? (m[1].match(/^defaultReads:\s*(.+)$/m)?.[1] ?? "") : "";
+    return raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+const MODEL_ERROR_RE = /model|auth|api key|oauth|unavailable|not found|resolve|scope|thinking|provider/i;
+const isModelError = (error?: string) => !!error && MODEL_ERROR_RE.test(error);
+
+function spawnPrompt(kind: Exclude<Classification, "none">, task: string, reads: string[]): string {
+  const readFirst = reads.length
+    ? [`Read these files first if present (they carry prior context): ${reads.join(", ")}`, ""]
+    : [];
   if (kind === "explore") {
     return [
       SPAWN_MARKER,
+      ...readFirst,
       "Reconnaissance pass for the request below. Report entry points, relevant files, data flow, existing patterns, constraints and unknowns.",
       "Do not recommend implementation approaches and do not edit files.",
       "",
@@ -122,6 +197,7 @@ function spawnPrompt(kind: Exclude<Classification, "none">, task: string): strin
   if (kind === "plan") {
     return [
       SPAWN_MARKER,
+      ...readFirst,
       "Produce a concise, evidence-backed implementation plan for the request below: goal and non-goals, recommended approach and why, files/components, ordered steps, risks, validation.",
       "Do not edit files. The parent session will implement after reading your plan.",
       "",
@@ -131,6 +207,7 @@ function spawnPrompt(kind: Exclude<Classification, "none">, task: string): strin
   }
   return [
     SPAWN_MARKER,
+    ...readFirst,
     "Review the current state of this repository for the request below. Inspect the real diff (`git diff`, `git diff --cached`).",
     "Report evidence-backed findings: correctness, missed requirements, regressions, missing validation. Do not edit files.",
     "",
@@ -162,48 +239,88 @@ function sessionId(ctx: ExtensionContext | undefined): string {
 export default function (pi: ExtensionAPI) {
   /** Spawn through the runtime's cross-extension RPC; resolve with the agent id. */
   const spawnAgent = (kind: Exclude<Classification, "none">, task: string, ctx: ExtensionContext): Promise<string | undefined> => {
-    return new Promise((resolve) => {
-      const requestId = `flow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const channel = `subagents:rpc:spawn:reply:${requestId}`;
-      let done = false;
-      const unsub = pi.events.on(channel, (raw: unknown) => {
-        done = true;
-        try {
-          if (typeof unsub === "function") unsub();
-        } catch {
-          /* ignore */
-        }
-        const reply = raw as { success?: boolean; data?: { id?: string }; error?: string };
-        audit({ action: "spawn-reply", kind, requestId, success: reply?.success === true, id: reply?.data?.id, error: reply?.error });
-        resolve(reply?.data?.id);
-      });
-      try {
-        // description is required: the runtime renders record.description verbatim
-        // and an unset value shows up in the UI as the literal string "undefined".
-        const head = task.replace(/\s+/g, " ").trim().slice(0, 48);
-        pi.events.emit("subagents:rpc:spawn", {
-          requestId,
-          type: kind === "explore" ? "explorer" : kind === "plan" ? "planner" : "reviewer",
-          prompt: spawnPrompt(kind, task),
-          options: { runInBackground: true, description: `auto: ${kind}${head ? ` — ${head}` : ""}` },
+    const type = agentTypeName(kind);
+    const reads = readsFor(type);
+    const prompt = spawnPrompt(kind, task, reads);
+    // description is required: the runtime renders record.description verbatim
+    // and an unset value shows up in the UI as the literal string "undefined".
+    const head = task.replace(/\s+/g, " ").trim().slice(0, 48);
+    const description = `auto: ${kind}${head ? ` — ${head}` : ""}`;
+
+    const attempt = (model?: string): Promise<{ id?: string; error?: string }> =>
+      new Promise((resolve) => {
+        const requestId = `flow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const channel = `subagents:rpc:spawn:reply:${requestId}`;
+        let done = false;
+        const unsub = pi.events.on(channel, (raw: unknown) => {
+          done = true;
+          try {
+            if (typeof unsub === "function") unsub();
+          } catch {
+            /* ignore */
+          }
+          const reply = raw as { success?: boolean; data?: { id?: string }; error?: string };
+          audit({
+            action: "spawn-reply",
+            kind,
+            requestId,
+            model: model ?? "(pin)",
+            success: reply?.success === true,
+            id: reply?.data?.id,
+            error: reply?.error,
+          });
+          if (reply?.success && reply.data?.id) resolve({ id: reply.data.id });
+          else resolve({ error: reply?.error ?? "spawn failed" });
         });
-      } catch (err) {
-        audit({ action: "spawn-threw", kind, error: String(err) });
-        resolve(undefined);
-        return;
-      }
-      setTimeout(() => {
-        if (done) return;
         try {
-          if (typeof unsub === "function") unsub();
-        } catch {
-          /* ignore */
+          const options: Record<string, unknown> = { runInBackground: true, description };
+          if (model) options.model = model;
+          pi.events.emit("subagents:rpc:spawn", { requestId, type, prompt, options });
+        } catch (err) {
+          audit({ action: "spawn-threw", kind, error: String(err) });
+          resolve({ error: String(err) });
+          return;
         }
-        audit({ action: "spawn-timeout", kind, requestId });
-        if (ctx.hasUI) ctx.ui.notify(`${PKG}: could not auto-start ${kind} (no subagent runtime?)`, "warning");
-        resolve(undefined);
-      }, 10_000);
-    });
+        setTimeout(() => {
+          if (done) return;
+          try {
+            if (typeof unsub === "function") unsub();
+          } catch {
+            /* ignore */
+          }
+          audit({ action: "spawn-timeout", kind, requestId });
+          resolve({ error: "no reply from subagent runtime" });
+        }, 10_000);
+      });
+
+    return (async () => {
+      // Explicit primary so a bad pin hard-errors (frontmatter pins only warn
+      // and inherit, which would silently swallow the fallback chain).
+      const seen = new Set<string>();
+      const candidates: Array<string | undefined> = [];
+      for (const m of [primaryFor(type), ...fallbacksFor(type)]) {
+        const key = m ?? "(inherit)";
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push(m);
+      }
+      if (candidates.length === 0) candidates.push(undefined);
+      for (let i = 0; i < candidates.length; i++) {
+        const result = await attempt(candidates[i]);
+        if (result.id) return result.id;
+        // Fail over only on model-looking errors; anything else fails fast.
+        const next = candidates[i + 1];
+        if (next === undefined || !isModelError(result.error)) {
+          if (ctx.hasUI && !isModelError(result.error)) {
+            ctx.ui.notify(`${PKG}: could not auto-start ${kind} (${result.error ?? "no subagent runtime?"})`, "warning");
+          }
+          return undefined;
+        }
+        audit({ action: "spawn-fallback", kind, from: candidates[i] ?? "(inherit)", to: next, error: result.error });
+        if (ctx.hasUI) ctx.ui.notify(`${PKG}: model failed, retrying ${type} with ${next}`, "warning");
+      }
+      return undefined;
+    })();
   };
 
   /* -- 1. classify each new task and optionally start an agent up front ------ */

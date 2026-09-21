@@ -51,7 +51,14 @@ function settings(): Settings {
   }
 }
 
-type AgentMeta = { name: string; description: string; whenToUse: string; outcome: string; tools: string };
+type AgentMeta = {
+  name: string;
+  description: string;
+  whenToUse: string;
+  outcome: string;
+  tools: string;
+  reads: string;
+};
 
 /** Delegation policy wording mirrors the macOS app (light | balanced | strict). */
 const POLICY_BULLETS: Record<string, string[]> = {
@@ -97,6 +104,7 @@ function readAgentMeta(): AgentMeta[] {
         whenToUse: get("whenToUse"),
         outcome: get("defaultExpectedOutcome"),
         tools: get("tools"),
+        reads: get("defaultReads"),
       });
     } catch {
       /* skip unreadable */
@@ -151,7 +159,14 @@ function routingSection(): string | undefined {
           .map((t) => t.trim().replace(/^ext:[^/]+\//, ""))
           .join(", ")}`
       : "default tools";
-    lines.push(`- \`${a.name}\`: ${routing} [outcome: ${a.outcome || "reportOnly"}; ${tools}]`);
+    const reads = a.reads
+      ? `; reads: ${a.reads
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(", ")}`
+      : "";
+    lines.push(`- \`${a.name}\`: ${routing} [outcome: ${a.outcome || "reportOnly"}; ${tools}${reads}]`);
   }
   return lines.join("\n");
 }
