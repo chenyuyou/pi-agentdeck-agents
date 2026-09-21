@@ -14,7 +14,7 @@
  * auditable and tunable with `/agentdeck-flow test <text>`.
  *
  * Settings live in ~/.pi/agent/agentdeck.json (shared with the other extensions):
- *   { "autoSpawn": true, "planGate": false }
+ *   { "autoSpawn": false, "planGate": false }
  *
  * Self-contained on purpose (no relative imports) — see orchestrator.ts.
  */
@@ -41,7 +41,7 @@ function agentDir(): string {
 }
 
 function readSettings(): Settings {
-  const fallback: Settings = { autoSpawn: true, planGate: false };
+  const fallback: Settings = { autoSpawn: false, planGate: false };
   try {
     const raw = JSON.parse(readFileSync(join(agentDir(), "agentdeck.json"), "utf8")) as Partial<Settings>;
     return {

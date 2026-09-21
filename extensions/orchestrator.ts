@@ -60,17 +60,6 @@ function readSettings(): Settings {
   }
 }
 
-function writeSettings(patch: Partial<Settings>): Settings {
-  const next = { ...readSettings(), ...patch };
-  try {
-    mkdirSync(agentDir(), { recursive: true });
-    writeFileSync(settingsPath(), JSON.stringify(next, null, 2) + "\n", "utf8");
-  } catch {
-    /* best effort */
-  }
-  return next;
-}
-
 function audit(entry: Record<string, unknown>): void {
   try {
     mkdirSync(agentDir(), { recursive: true });

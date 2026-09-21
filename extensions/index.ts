@@ -332,8 +332,16 @@ function toolDescriptionState(): string {
 function writeOrchestrationSettings(patch: Partial<OrchestrationSettings>): OrchestrationSettings {
   const next = { ...readOrchestrationSettings(), ...patch };
   try {
+    // Merge over the full file content so unrelated keys (loop,
+    // supervisorTimeoutSeconds, …) survive a patch write.
+    let current: Record<string, unknown> = {};
+    try {
+      current = JSON.parse(readFileSync(join(agentBaseDir(), SETTINGS_FILE), "utf8")) as Record<string, unknown>;
+    } catch {
+      /* no existing file: start from scratch */
+    }
     mkdirSync(agentBaseDir(), { recursive: true });
-    writeFileSync(join(agentBaseDir(), SETTINGS_FILE), JSON.stringify(next, null, 2) + "\n", "utf8");
+    writeFileSync(join(agentBaseDir(), SETTINGS_FILE), JSON.stringify({ ...current, ...next }, null, 2) + "\n", "utf8");
   } catch {
     /* best effort */
   }

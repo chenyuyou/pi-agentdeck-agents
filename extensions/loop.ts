@@ -333,8 +333,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    // Discovery hint until the first loop run creates the dir (fresh installs
+    // need it most; after that /agentdeck-loop status covers visibility).
     const dir = join(agentDir(), "agentdeck-loop");
-    if (!existsSync(dir) || !ctx.hasUI) return;
+    if (existsSync(dir)) return;
     const settings = loopSettings();
     ctx.ui.notify(
       `${PKG} loop ready — /agentdeck-loop <goal> (maker: ${settings.maker}${settings.command ? `, validation: ${settings.command}` : ", no validation command"})`,
