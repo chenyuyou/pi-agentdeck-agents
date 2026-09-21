@@ -16,11 +16,11 @@
  * how the host resolves TS module specifiers.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const PKG = "pi-agentdeck-agents";
 const ROUTING_MARKER = "AGENT-ROUTING-V1";
@@ -59,6 +59,41 @@ function readSettings(): Settings {
   } catch {
     return defaults;
   }
+}
+
+/**
+ * Agent directories in the runtime's own precedence order (project wins), so the
+ * catalog describes exactly the agents that can actually be dispatched.
+ */
+function candidateAgentDirs(): string[] {
+  const dirs: string[] = [];
+  try {
+    const project = join(process.cwd(), CONFIG_DIR_NAME, "agents");
+    if (existsSync(project)) dirs.push(project);
+  } catch {
+    /* ignore */
+  }
+  dirs.push(join(agentDir(), "agents"));
+  return dirs;
+}
+
+/** First agent file named `<type>.md` across the candidate dirs. */
+function readAgentFile(type: string): string | undefined {
+  for (const dir of candidateAgentDirs()) {
+    const file = join(dir, `${type}.md`);
+    try {
+      if (existsSync(file)) return readFileSync(file, "utf8");
+    } catch {
+      /* try the next dir */
+    }
+  }
+  return undefined;
+}
+
+/** Minimal frontmatter reader over a single file's text. */
+function frontmatterGet(text: string, key: string): string {
+  const fm = text.replace(/^\uFEFF/, "").match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
+  return (fm.match(new RegExp(`^${key}:\\s*(.+)$`, "m"))?.[1] ?? "").trim().replace(/^["']|["']$/g, "");
 }
 
 function audit(entry: Record<string, unknown>): void {
@@ -101,7 +136,11 @@ function readSpend(): Spend {
 function writeSpend(spend: Spend): void {
   try {
     mkdirSync(agentDir(), { recursive: true });
-    writeFileSync(spendPath(), JSON.stringify(spend, null, 2) + "\n", "utf8");
+    // tmp + rename: two processes (the background agent runner also loads this
+    // extension) can write spend concurrently; a partial file would lose all of it.
+    const tmp = `${spendPath()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(spend, null, 2) + "\n", "utf8");
+    renameSync(tmp, spendPath());
   } catch {
     /* best effort */
   }
@@ -196,19 +235,14 @@ function fallbacksFor(type: string): string[] {
   }
 }
 
-/** defaultReads from the installed agent file (mac field the runtime ignores). */
+/** defaultReads from the agent file (mac field the runtime ignores). */
 function readsFor(type: string): string[] {
-  try {
-    const text = readFileSync(join(agentDir(), "agents", `${type}.md`), "utf8");
-    const m = text.match(/^---\n([\s\S]*?)\n---/);
-    const raw = m ? (m[1].match(/^defaultReads:\s*(.+)$/m)?.[1] ?? "") : "";
-    return raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
+  const text = readAgentFile(type);
+  if (!text) return [];
+  return frontmatterGet(text, "defaultReads")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 const MODEL_ERROR_RE = /model|auth|api key|oauth|unavailable|not found|resolve|scope|thinking|provider/i;
@@ -252,29 +286,30 @@ function policyName(): string {
   }
 }
 
-/** Minimal frontmatter reader: `key: value` lines at column 0. */
+/** Minimal frontmatter reader: `key: value` lines at column 0, project first. */
 function readAgentMeta(): AgentMeta[] {
-  const dir = join(agentDir(), "agents");
-  if (!existsSync(dir)) return [];
   const out: AgentMeta[] = [];
-  for (const file of readdirSync(dir).filter((f) => f.endsWith(".md")).sort()) {
-    try {
-      const text = readFileSync(join(dir, file), "utf8").replace(/^\uFEFF/, "");
-      const m = text.match(/^---\n([\s\S]*?)\n---/);
-      const fm = m ? m[1] : "";
-      const get = (k: string) =>
-        (fm.match(new RegExp(`^${k}:\\s*(.+)$`, "m"))?.[1] ?? "").trim().replace(/^["']|["']$/g, "");
-      out.push({
-        name: get("name") || file.replace(/\.md$/, ""),
-        description: get("description"),
-        whenToUse: get("whenToUse"),
-        model: get("model"),
-        outcome: get("defaultExpectedOutcome"),
-        tools: get("tools"),
-        reads: get("defaultReads"),
-      });
-    } catch {
-      /* skip unreadable */
+  const seen = new Set<string>();
+  for (const dir of candidateAgentDirs()) {
+    if (!existsSync(dir)) continue;
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".md")).sort()) {
+      try {
+        const text = readFileSync(join(dir, file), "utf8").replace(/^\uFEFF/, "");
+        const name = frontmatterGet(text, "name") || file.replace(/\.md$/, "");
+        if (seen.has(name)) continue; // project shadows global
+        seen.add(name);
+        out.push({
+          name,
+          description: frontmatterGet(text, "description"),
+          whenToUse: frontmatterGet(text, "whenToUse"),
+          model: frontmatterGet(text, "model"),
+          outcome: frontmatterGet(text, "defaultExpectedOutcome"),
+          tools: frontmatterGet(text, "tools"),
+          reads: frontmatterGet(text, "defaultReads"),
+        });
+      } catch {
+        /* skip unreadable */
+      }
     }
   }
   return out;
@@ -421,10 +456,13 @@ export default function (pi: ExtensionAPI) {
 
   // A failed edit should not trigger a review of a file that was never written.
   pi.on("tool_execution_end", async (event, _ctx) => {
-    if (!event.isError) return;
-    const call = editCalls.get(String(event.toolCallId ?? ""));
+    // Delete on BOTH paths: a successful edit used to leave its entry behind,
+    // so the map grew once per edit for the life of the session.
+    const key = String(event.toolCallId ?? "");
+    const call = editCalls.get(key);
     if (!call) return;
-    editCalls.delete(String(event.toolCallId));
+    editCalls.delete(key);
+    if (!event.isError) return;
     const set = pendingEdits.get(call.sid);
     if (set) {
       set.delete(call.file);
@@ -436,20 +474,22 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    const sid = sessionId(ctx);
+    // Take (and clear) this session's edit set before any early return, so an
+    // autoreview-off or non-interactive session cannot accumulate entries.
+    const files = pendingEdits.get(sid);
+    pendingEdits.delete(sid);
+
     const settings = readSettings();
     if (!settings.autoreview) return;
 
     const mode = String((ctx as { mode?: string }).mode ?? "tui");
     if (!INTERACTIVE_MODES.has(mode)) {
-      pendingEdits.clear();
       audit({ action: "skipped", reason: `non-interactive mode (${mode})`, files: [] });
       return;
     }
 
-    const sid = sessionId(ctx);
-    const files = pendingEdits.get(sid);
     if (!files || files.size === 0) return;
-    pendingEdits.delete(sid);
 
     if (!checkBudget(ctx, "auto-review")) return;
 
@@ -514,6 +554,13 @@ export default function (pi: ExtensionAPI) {
           if (model) options.model = model;
           pi.events.emit("subagents:rpc:spawn", { requestId, type: "reviewer", prompt, options });
         } catch (err) {
+          // Release the reply listener: an emit that throws never gets a reply,
+          // so leaving it subscribed would leak one listener per failure.
+          try {
+            if (typeof unsub === "function") unsub();
+          } catch {
+            /* ignore */
+          }
           audit({ action: "spawn-threw", error: String(err) });
           resolve({ error: String(err) });
           return;

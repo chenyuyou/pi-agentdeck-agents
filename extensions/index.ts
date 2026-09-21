@@ -21,7 +21,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -45,16 +45,54 @@ function agentBaseDir(): string {
 }
 
 /**
- * Project-local installs (`pi install -l`, i.e. this package lives under
- * `<project>/.pi/{npm,git}/...`) seed into the project's own agent dir instead of
- * touching the global one.
+ * Project-local installs seed into the project instead of the global dir.
+ * Two shapes must be recognized:
+ *   1. the package itself lives under `<project>/.pi/{npm,git}/…`
+ *   2. it is a *local path* referenced from a project settings file
+ *      (`pi install -l /some/path` writes a relative path there instead of
+ *      copying anything), which is the case this used to miss.
  */
 function projectRootFromPackage(): string | undefined {
   const marker = `${sep}${CONFIG_DIR_NAME}${sep}`;
   const i = ROOT.indexOf(marker);
-  if (i === -1) return undefined;
-  const after = ROOT.slice(i + marker.length);
-  if (after.startsWith(`npm${sep}`) || after.startsWith(`git${sep}`)) return ROOT.slice(0, i);
+  if (i !== -1) {
+    const after = ROOT.slice(i + marker.length);
+    if (after.startsWith(`npm${sep}`) || after.startsWith(`git${sep}`)) return ROOT.slice(0, i);
+  }
+  return projectRootFromSettingsReference();
+}
+
+/** Walk up from cwd looking for a `.pi/settings.json` that points at this package. */
+function projectRootFromSettingsReference(): string | undefined {
+  let dir = process.cwd();
+  for (let depth = 0; depth < 8; depth++) {
+    const configDir = join(dir, CONFIG_DIR_NAME);
+    const settings = join(configDir, "settings.json");
+    if (existsSync(settings)) {
+      try {
+        const raw = JSON.parse(readFileSync(settings, "utf8")) as { packages?: unknown };
+        const list = Array.isArray(raw.packages) ? raw.packages : [];
+        for (const entry of list) {
+          const spec =
+            typeof entry === "string"
+              ? entry
+              : entry && typeof entry === "object" && typeof (entry as { source?: unknown }).source === "string"
+                ? (entry as { source: string }).source
+                : undefined;
+          if (!spec) continue;
+          // npm:/git:/protocol references are not local paths.
+          if (/^(npm|git):/.test(spec) || /^[a-z][a-z0-9+.-]*:\/\//i.test(spec)) continue;
+          // Relative specs resolve against the settings file's own directory.
+          if (resolve(configDir, spec) === ROOT) return dir;
+        }
+      } catch {
+        /* unreadable settings: keep walking */
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
   return undefined;
 }
 
@@ -158,6 +196,10 @@ function applyOverlay(content: string, name: string, overlay: Overlay): string {
   for (const [key, value] of Object.entries(replacements)) {
     if (!seen.has(key)) front.push(`${key}: ${value}`);
   }
+  // An agent file with no `tools:` line still deserves the overlay's extras;
+  // previously they were silently dropped because mapTools never ran.
+  const extras = [...(overlay.toolAppend ?? []), ...(agent.toolsAppend ?? [])];
+  if (!seen.has("tools") && extras.length > 0) front.push(`tools: ${[...new Set(extras)].join(", ")}`);
   return ["---", ...front, ...lines.slice(end)].join("\n");
 }
 
@@ -231,6 +273,11 @@ function healOverlay(content: string, name: string, overlay: Overlay): { text: s
       front[toolsIdx] = `tools: ${[...new Set(mapped)].join(", ")}`;
       added.push("tools");
     }
+  } else if (toolsIdx === -1 && append.length > 0) {
+    // No `tools:` line to remap into: add one so the overlay's extras are not
+    // silently missing (and so doctor can report the drift).
+    front.push(`tools: ${[...new Set(append)].join(", ")}`);
+    added.push("tools");
   }
 
   if (added.length === 0) return { text: content, added };
@@ -762,7 +809,7 @@ export default function (pi: ExtensionAPI) {
           `loop:            maker=${readLoopInfo().maker} · validation=${readLoopInfo().command || "(none)"} · max=${readLoopInfo().maxIterations}`,
           `routing hints:   injected each turn (see /agentdeck-routing)`,
           spendLine(),
-          `scope:           ${projectRootFromPackage() ? "project-local" : "global"}`,
+          `scope:           ${projectRootFromPackage() ? `project-local (${projectRootFromPackage()})` : "global"}`,
         ];
         report(ctx, `${PKG} doctor\n${lines.join("\n")}`, runtime ? "info" : "warning");
         return;

@@ -19,11 +19,11 @@
  * Self-contained on purpose (no relative imports) — see orchestrator.ts.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const PKG = "pi-agentdeck-agents";
 const EDIT_TOOLS = new Set(["edit", "write"]);
@@ -85,7 +85,11 @@ function readSpend(): Spend {
 function writeSpend(spend: Spend): void {
   try {
     mkdirSync(agentDir(), { recursive: true });
-    writeFileSync(spendPath(), JSON.stringify(spend, null, 2) + "\n", "utf8");
+    // tmp + rename: two processes (the background agent runner also loads this
+    // extension) can write spend concurrently; a partial file would lose all of it.
+    const tmp = `${spendPath()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(spend, null, 2) + "\n", "utf8");
+    renameSync(tmp, spendPath());
   } catch {
     /* best effort */
   }
@@ -198,6 +202,19 @@ export function classify(text: string): { kind: Classification; why: string } {
 
 /* --------------------------------------- overlay: reads + fallback models */
 
+/** Agent dirs in the runtime's precedence order (project first). */
+function candidateAgentDirs(): string[] {
+  const dirs: string[] = [];
+  try {
+    const project = join(process.cwd(), CONFIG_DIR_NAME, "agents");
+    if (existsSync(project)) dirs.push(project);
+  } catch {
+    /* ignore */
+  }
+  dirs.push(join(agentDir(), "agents"));
+  return dirs;
+}
+
 function packageRoot(): string {
   try {
     return join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -249,18 +266,24 @@ function fallbacksFor(type: string): string[] {
 }
 
 /** defaultReads from the installed agent file (mac field the runtime ignores). */
+/** defaultReads from the agent file (mac field the runtime ignores). Project wins. */
 function readsFor(type: string): string[] {
-  try {
-    const text = readFileSync(join(agentDir(), "agents", `${type}.md`), "utf8");
-    const m = text.match(/^---\n([\s\S]*?)\n---/);
-    const raw = m ? (m[1].match(/^defaultReads:\s*(.+)$/m)?.[1] ?? "") : "";
-    return raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
+  for (const dir of candidateAgentDirs()) {
+    try {
+      const file = join(dir, `${type}.md`);
+      if (!existsSync(file)) continue;
+      const text = readFileSync(file, "utf8");
+      const m = text.match(/^---\n([\s\S]*?)\n---/);
+      const raw = m ? (m[1].match(/^defaultReads:\s*(.+)$/m)?.[1] ?? "") : "";
+      return raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } catch {
+      /* try the next dir */
+    }
   }
+  return [];
 }
 
 const MODEL_ERROR_RE = /model|auth|api key|oauth|unavailable|not found|resolve|scope|thinking|provider/i;
@@ -364,6 +387,12 @@ export default function (pi: ExtensionAPI) {
           if (model) options.model = model;
           pi.events.emit("subagents:rpc:spawn", { requestId, type, prompt, options });
         } catch (err) {
+          // Release the reply listener: an emit that throws never gets a reply.
+          try {
+            if (typeof unsub === "function") unsub();
+          } catch {
+            /* ignore */
+          }
           audit({ action: "spawn-threw", kind, error: String(err) });
           resolve({ error: String(err) });
           return;
@@ -391,20 +420,30 @@ export default function (pi: ExtensionAPI) {
         seen.add(key);
         candidates.push(m);
       }
+      // No explicit pin and no fallbacks leaves one candidate: inherit the parent
+      // model. After explicit pins we deliberately do NOT fall back to inherit —
+      // a silent model change is worse than a visible failure.
       if (candidates.length === 0) candidates.push(undefined);
       for (let i = 0; i < candidates.length; i++) {
         const result = await attempt(candidates[i]);
         if (result.id) return result.id;
+        const isLast = i === candidates.length - 1;
+        audit({ action: "spawn-failed", kind, model: candidates[i] ?? "(inherit)", error: result.error, isLast });
         // Fail over only on model-looking errors; anything else fails fast.
-        const next = candidates[i + 1];
-        if (next === undefined || !isModelError(result.error)) {
-          if (ctx.hasUI && !isModelError(result.error)) {
-            ctx.ui.notify(`${PKG}: could not auto-start ${kind} (${result.error ?? "no subagent runtime?"})`, "warning");
+        if (isLast || !isModelError(result.error)) {
+          // Always surface the terminal failure — a model error used to be
+          // swallowed here, leaving auto-start silently doing nothing.
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              `${PKG}: could not auto-start ${kind} (${result.error ?? "no subagent runtime?"})`,
+              "warning",
+            );
           }
           return undefined;
         }
-        audit({ action: "spawn-fallback", kind, from: candidates[i] ?? "(inherit)", to: next, error: result.error });
-        if (ctx.hasUI) ctx.ui.notify(`${PKG}: model failed, retrying ${type} with ${next}`, "warning");
+        const next = candidates[i + 1];
+        audit({ action: "spawn-fallback", kind, from: candidates[i] ?? "(inherit)", to: next ?? "(inherit)", error: result.error });
+        if (ctx.hasUI) ctx.ui.notify(`${PKG}: model failed, retrying ${type} with ${next ?? "the parent model"}`, "warning");
       }
       return undefined;
     })();
@@ -465,12 +504,28 @@ export default function (pi: ExtensionAPI) {
         usage?: { cost?: { total?: number } };
       } | undefined;
       if (!data?.type) return;
-      // Any planner run satisfies the gate, ours or the model's own.
+      // A planner run satisfies the gate. Correlate by the agent id we started
+      // when we have one; only a model-initiated planner (no spawnId) falls back
+      // to opening every planning session, since the completion event carries no
+      // session id to correlate on.
       if (data.type === "planner") {
+        let matched = false;
         for (const state of tasks.values()) {
-          if (state.kind === "plan") state.planned = true;
+          if (state.kind === "plan" && state.spawnId && state.spawnId === data.id) {
+            state.planned = true;
+            matched = true;
+          }
+        }
+        if (!matched) {
+          for (const state of tasks.values()) {
+            if (state.kind === "plan" && !state.spawnId) state.planned = true;
+          }
         }
       }
+      // Central spend accounting: EVERY subagent completion lands here, whatever
+      // spawned it (flow auto-start, orchestrator auto-review, loop steps, or the
+      // model itself), because this listener is the only one that accumulates.
+      // Moving this call would silently split the budget guard from its data.
       const cost = Number(data.usage?.cost?.total ?? 0);
       if (Number.isFinite(cost) && cost > 0) addSpend(cost);
       audit({ action: channel === "subagents:completed" ? "agent-completed" : "agent-failed", type: data.type, id: data.id });

@@ -27,7 +27,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const MARKER = "<!-- pi-agentdeck-agents:tool-description -->";
 const UPSTREAM_EXAMPLE = join("@tintinweb", "pi-subagents", "examples", "agent-tool-description.md");
@@ -49,6 +49,27 @@ function settings(): Settings {
   } catch {
     return { toolRouting: true };
   }
+}
+
+/**
+ * Agent directories in the runtime's own precedence order (project wins), so the
+ * generated description lists exactly the agents that can be dispatched.
+ */
+function candidateAgentDirs(): string[] {
+  const dirs: string[] = [];
+  try {
+    const project = join(process.cwd(), CONFIG_DIR_NAME, "agents");
+    if (existsSync(project)) dirs.push(project);
+  } catch {
+    /* ignore */
+  }
+  dirs.push(join(agentDir(), "agents"));
+  return dirs;
+}
+
+function frontmatterGet(text: string, key: string): string {
+  const fm = text.replace(/^\uFEFF/, "").match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
+  return (fm.match(new RegExp(`^${key}:\\s*(.+)$`, "m"))?.[1] ?? "").trim().replace(/^["']|["']$/g, "");
 }
 
 type AgentMeta = {
@@ -89,25 +110,27 @@ function policyName(): string {
 }
 
 function readAgentMeta(): AgentMeta[] {
-  const dir = join(agentDir(), "agents");
-  if (!existsSync(dir)) return [];
   const out: AgentMeta[] = [];
-  for (const file of readdirSync(dir).filter((f) => f.endsWith(".md")).sort()) {
-    try {
-      const text = readFileSync(join(dir, file), "utf8").replace(/^\uFEFF/, "");
-      const fm = text.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
-      const get = (k: string) =>
-        (fm.match(new RegExp(`^${k}:\\s*(.+)$`, "m"))?.[1] ?? "").trim().replace(/^["']|["']$/g, "");
-      out.push({
-        name: get("name") || file.replace(/\.md$/, ""),
-        description: get("description"),
-        whenToUse: get("whenToUse"),
-        outcome: get("defaultExpectedOutcome"),
-        tools: get("tools"),
-        reads: get("defaultReads"),
-      });
-    } catch {
-      /* skip unreadable */
+  const seen = new Set<string>();
+  for (const dir of candidateAgentDirs()) {
+    if (!existsSync(dir)) continue;
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".md")).sort()) {
+      try {
+        const text = readFileSync(join(dir, file), "utf8");
+        const name = frontmatterGet(text, "name") || file.replace(/\.md$/, "");
+        if (seen.has(name)) continue; // project shadows global
+        seen.add(name);
+        out.push({
+          name,
+          description: frontmatterGet(text, "description"),
+          whenToUse: frontmatterGet(text, "whenToUse"),
+          outcome: frontmatterGet(text, "defaultExpectedOutcome"),
+          tools: frontmatterGet(text, "tools"),
+          reads: frontmatterGet(text, "defaultReads"),
+        });
+      } catch {
+        /* skip unreadable */
+      }
     }
   }
   return out;
@@ -244,6 +267,7 @@ function disable(): SyncResult {
   if (sub.toolDescriptionMode !== "custom") {
     return { wroteFile: false, wroteMode: false, mode: String(sub.toolDescriptionMode ?? "full") };
   }
+  mkdirSync(agentDir(), { recursive: true });
   writeFileSync(subagentsPath(), JSON.stringify({ ...sub, toolDescriptionMode: "full" }, null, 2) + "\n", "utf8");
   return { file: path, wroteFile: false, wroteMode: true, mode: "full" };
 }

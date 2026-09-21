@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const PKG = "pi-agentdeck-agents";
 const INTERACTIVE_MODES = new Set(["tui", "rpc"]);
@@ -159,20 +159,37 @@ function primaryFor(type: string): string | undefined {
   return undefined;
 }
 
-function readsFor(type: string): string[] {
+/** defaultReads from the agent file (mac field the runtime ignores). Project wins. */
+function candidateAgentDirs(): string[] {
+  const dirs: string[] = [];
   try {
-    const base =
-      process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
-    const text = readFileSync(join(base, "agents", `${type}.md`), "utf8");
-    const m = text.match(/^---\n([\s\S]*?)\n---/);
-    const raw = m ? (m[1].match(/^defaultReads:\s*(.+)$/m)?.[1] ?? "") : "";
-    return raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const project = join(process.cwd(), CONFIG_DIR_NAME, "agents");
+    if (existsSync(project)) dirs.push(project);
   } catch {
-    return [];
+    /* ignore */
   }
+  const base = process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
+  dirs.push(join(base, "agents"));
+  return dirs;
+}
+
+function readsFor(type: string): string[] {
+  for (const dir of candidateAgentDirs()) {
+    try {
+      const file = join(dir, `${type}.md`);
+      if (!existsSync(file)) continue;
+      const text = readFileSync(file, "utf8");
+      const m = text.match(/^---\n([\s\S]*?)\n---/);
+      const raw = m ? (m[1].match(/^defaultReads:\s*(.+)$/m)?.[1] ?? "") : "";
+      return raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    } catch {
+      /* try the next dir */
+    }
+  }
+  return [];
 }
 
 const spawn = (
@@ -207,6 +224,12 @@ const spawn = (
         if (modelOverride) options.model = modelOverride;
         pi.events.emit("subagents:rpc:spawn", { requestId, type, prompt, options });
       } catch (err) {
+        // Release the reply listener: an emit that throws never gets a reply.
+        try {
+          if (typeof unsub === "function") unsub();
+        } catch {
+          /* ignore */
+        }
         resolve({ error: String(err) });
         return;
       }
