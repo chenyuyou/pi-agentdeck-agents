@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm provenance
+  id-token: write # OIDC for npm trusted publishing + provenance
 
 jobs:
   npm:
@@ -18,8 +18,14 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22 # >= 22.14.0 required by trusted publishing
           registry-url: https://registry.npmjs.org
+
+      # Trusted publishing requires npm CLI >= 11.5.1.
+      - name: Use a trusted-publishing capable npm
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       # Skip (do not fail) when the tag does not match package.json — historical
       # tags such as v0.1.0/v0.2.0 must not produce red publish runs.
@@ -33,8 +39,14 @@ jobs:
             echo "::notice::tag $TAG does not match package.json ($PKG) — skipping publish"
           fi
 
+      # No NODE_AUTH_TOKEN: npm detects the OIDC environment and authenticates as
+      # the trusted publisher configured for this package on npmjs.com.
       - name: Publish to npm
         if: steps.check.outputs.skip != 'true'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # If trusted publishing is not configured yet, say so instead of failing silently.
+      - name: Hint on failure
+        if: failure() && steps.check.outputs.skip != 'true'
+        run: |
+          echo "::warning::npm publish failed. If this is the first release, configure a Trusted Publisher for this package on npmjs.com (Settings → Trusted Publisher → GitHub Actions), or publish once locally with a token."
