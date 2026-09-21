@@ -161,12 +161,112 @@ function applyOverlay(content: string, name: string, overlay: Overlay): string {
   return ["---", ...front, ...lines.slice(end)].join("\n");
 }
 
+/**
+ * Self-heal an already-installed file: add overlay keys that are missing,
+ * remap tool tokens the overlay declares. Existing values are never touched —
+ * a user override always wins. Returns the patched text and what was added.
+ */
+function healOverlay(content: string, name: string, overlay: Overlay): { text: string; added: string[] } {
+  const agent = overlay.agents?.[name] ?? {};
+  const model = resolveModel(name, agent, overlay);
+  const wanted: Record<string, string> = {};
+  if (model) wanted.model = model;
+  if (agent.thinking) wanted.thinking = agent.thinking;
+
+  const map = overlay.toolMap ?? {};
+  const append = [...(overlay.toolAppend ?? []), ...(agent.toolsAppend ?? [])];
+
+  const text = content.replace(/^\uFEFF/, "");
+  const lines = text.split("\n");
+  if (lines[0]?.trim() !== "---") return { text: content, added: [] };
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t === "---" || t === "...") {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return { text: content, added: [] };
+
+  const present = new Set<string>();
+  for (const line of lines.slice(1, end)) {
+    const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:/);
+    if (m) present.add(m[1]);
+  }
+
+  const added: string[] = [];
+  const front: string[] = [];
+  // Insert missing scalar keys just before the closing fence, preserving order.
+  const missing = Object.keys(wanted).filter((k) => !present.has(k));
+  for (const line of lines.slice(1, end)) front.push(line);
+  for (const key of missing) {
+    front.push(`${key}: ${wanted[key]}`);
+    added.push(key);
+  }
+
+  // Remap only tokens the overlay declares; leave everything else alone.
+  const toolsIdx = front.findIndex((l) => /^tools\s*:/.test(l));
+  if (toolsIdx !== -1 && (Object.keys(map).length > 0 || append.length > 0)) {
+    const tokens = front[toolsIdx]
+      .replace(/^[^:]*:\s*/, "")
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    let changed = false;
+    const mapped = tokens.map((token) => {
+      let next = token;
+      for (let i = 0; i < TOOL_MAP_MAX_PASSES && map[next]; i++) next = map[next];
+      if (next !== token) changed = true;
+      return next;
+    });
+    for (const extra of append) {
+      if (!mapped.includes(extra)) {
+        mapped.push(extra);
+        changed = true;
+      }
+    }
+    if (changed) {
+      // De-duplicate while preserving order.
+      front[toolsIdx] = `tools: ${[...new Set(mapped)].join(", ")}`;
+      added.push("tools");
+    }
+  }
+
+  if (added.length === 0) return { text: content, added };
+  return { text: ["---", ...front, ...lines.slice(end)].join("\n"), added };
+}
+
+/** Dry-run heal check for doctor: which installed agents lack overlay keys. */
+function overlayStatus(): string {
+  try {
+    const overlay = loadOverlay();
+    const dst = agentRootDir();
+    const off: string[] = [];
+    let total = 0;
+    for (const name of bundledAgentNames()) {
+      total++;
+      const target = join(dst, `${name}.md`);
+      if (!existsSync(target)) {
+        off.push(`${name}:missing`);
+        continue;
+      }
+      const { added } = healOverlay(readFileSync(target, "utf8"), name, overlay);
+      if (added.length) off.push(`${name}:+${added.join(",")}`);
+    }
+    return off.length ? `drift (${off.join("; ")})` : `${total}/${total} in sync`;
+  } catch {
+    return "unknown";
+  }
+}
+
 /** Copy bundled agents into the agent dir. Existing files win unless force. */
-function seed(force = false): { written: string[]; skipped: string[] } {
+function seed(force = false): { written: string[]; skipped: string[]; healed: string[] } {
   const src = join(ROOT, "agents");
   const written: string[] = [];
   const skipped: string[] = [];
-  if (!existsSync(src)) return { written, skipped };
+  const healed: string[] = [];
+  if (!existsSync(src)) return { written, skipped, healed };
 
   const dst = agentRootDir();
   mkdirSync(dst, { recursive: true });
@@ -174,15 +274,23 @@ function seed(force = false): { written: string[]; skipped: string[] } {
 
   for (const file of readdirSync(src).filter((f) => f.endsWith(".md")).sort()) {
     const target = join(dst, file);
-    if (existsSync(target) && !force) {
-      skipped.push(file);
+    const name = file.replace(/\.md$/, "");
+    if (!existsSync(target) || force) {
+      writeFileSync(target, applyOverlay(readFileSync(join(src, file), "utf8"), name, overlay), "utf8");
+      written.push(file);
       continue;
     }
-    const name = file.replace(/\.md$/, "");
-    writeFileSync(target, applyOverlay(readFileSync(join(src, file), "utf8"), name, overlay), "utf8");
-    written.push(file);
+    // Installed file exists: only fill in what the overlay declares and the
+    // file lacks. Customized values are never overwritten (see healOverlay).
+    const { text, added } = healOverlay(readFileSync(target, "utf8"), name, overlay);
+    if (added.length > 0) {
+      writeFileSync(target, text, "utf8");
+      healed.push(`${file} (+${added.join(",")})`);
+    } else {
+      skipped.push(file);
+    }
   }
-  return { written, skipped };
+  return { written, skipped, healed };
 }
 
 function bundledAgentNames(): string[] {
@@ -386,9 +494,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx;
     try {
-      const { written } = seed();
-      if (written.length && ctx.hasUI) {
-        ctx.ui.notify(`${PKG}: installed ${written.join(", ")} → ${agentRootDir()}`, "info");
+      const { written, healed } = seed();
+      if ((written.length || healed.length) && ctx.hasUI) {
+        const bits: string[] = [];
+        if (written.length) bits.push(`installed ${written.join(", ")}`);
+        if (healed.length) bits.push(`healed ${healed.join(", ")}`);
+        ctx.ui.notify(`${PKG}: ${bits.join("; ")} → ${agentRootDir()}`, "info");
       }
     } catch {
       /* ignore */
@@ -514,6 +625,7 @@ export default function (pi: ExtensionAPI) {
           `agents dir:      ${agentRootDir()}`,
           `bundled agents:  ${bundledAgentNames().join(", ") || "none"}`,
           `baseline:        ${base.ok}/${base.total} identical${base.bad.length ? ` (bad: ${base.bad.join(", ")})` : ""}`,
+          `overlay:         ${overlayStatus()}`,
           `subagent tools:  ${runtime ? "present" : "NOT FOUND — install a subagent runtime"}`,
           `supervisor tool: ${tools.includes(SUPERVISOR_TOOL) ? "registered" : "not registered"}`,
           `auto-review:     ${readOrchestrationSettings().autoreview ? "ON" : "OFF"}`,

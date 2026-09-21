@@ -114,7 +114,12 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  const spawn = (type: string, prompt: string, ctx: ExtensionContext): Promise<string | undefined> =>
+  const spawn = (
+    type: string,
+    prompt: string,
+    ctx: ExtensionContext,
+    description?: string,
+  ): Promise<string | undefined> =>
     new Promise((resolve) => {
       const requestId = `loop-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const channel = `subagents:rpc:spawn:reply:${requestId}`;
@@ -140,7 +145,10 @@ export default function (pi: ExtensionAPI) {
           requestId,
           type,
           prompt,
-          options: { runInBackground: true, description: `loop ${run.phase}: ${run.goal.replace(/\s+/g, " ").trim().slice(0, 44)}` },
+          options: {
+            runInBackground: true,
+            description: description ?? type,
+          },
         });
       } catch (err) {
         if (ctx.hasUI) ctx.ui.notify(`${PKG} loop: spawn threw (${String(err)})`, "warning");
@@ -173,7 +181,12 @@ export default function (pi: ExtensionAPI) {
   const runStep = async (run: Run, type: string, prompt: string, ctx: ExtensionContext, note: string) => {
     run.steps.push({ phase: run.phase, iteration: run.iteration, note, at: new Date().toISOString() });
     persist(run, ctx);
-    const id = await spawn(type, prompt, ctx);
+    const id = await spawn(
+      type,
+      prompt,
+      ctx,
+      `loop ${run.phase}: ${run.goal.replace(/\s+/g, " ").trim().slice(0, 44)}`,
+    );
     if (!id) return undefined;
     run.steps[run.steps.length - 1].agentId = id;
     persist(run, ctx);
